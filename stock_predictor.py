@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
+import pytz
 import warnings
 import json
 import requests
@@ -14,7 +15,36 @@ import os
 # Check and import required packages
 missing_packages = []
 
+# Helper function to get Indian Standard Time
+def get_ist_time():
+    """Get current time in Indian Standard Time (IST)"""
+    try:
+        if PYTZ_AVAILABLE:
+            ist = pytz.timezone('Asia/Kolkata')
+            return datetime.now(ist)
+        else:
+            # Fallback to UTC + 5:30 if pytz is not available
+            utc_now = datetime.utcnow()
+            ist_offset = timedelta(hours=5, minutes=30)
+            return utc_now + ist_offset
+    except:
+        # Ultimate fallback - use local time with IST notation
+        return datetime.now()
+
+def format_ist_time(dt=None):
+    """Format IST time for display"""
+    if dt is None:
+        dt = get_ist_time()
+    return dt.strftime("%B %d, %Y at %H:%M IST")
+
 # Additional imports for new features
+try:
+    import pytz
+    PYTZ_AVAILABLE = True
+except ImportError:
+    missing_packages.append("pytz")
+    PYTZ_AVAILABLE = False
+
 try:
     from bs4 import BeautifulSoup
     BEAUTIFULSOUP_AVAILABLE = True
@@ -48,6 +78,9 @@ try:
     from sklearn.linear_model import LinearRegression
     from sklearn.metrics import mean_absolute_error, mean_squared_error
     from sklearn.preprocessing import StandardScaler
+    from sklearn.linear_model import Ridge
+    from sklearn.linear_model import Lasso
+    from sklearn.linear_model import ElasticNet
     SKLEARN_AVAILABLE = True
 except ImportError:
     missing_packages.append("scikit-learn")
@@ -105,7 +138,7 @@ class TransparentStockAnalyzer:
         
     def log_analysis(self, step: str, data: str, reasoning: str):
         """Log every analysis step with full transparency"""
-        timestamp = datetime.now().strftime("%H:%M:%S")
+        timestamp = get_ist_time().strftime("%H:%M:%S IST")
         self.analysis_log.append({
             'timestamp': timestamp,
             'step': step,
@@ -2931,12 +2964,410 @@ def display_prediction_table(predictions_dict: Dict, current_price: float):
             f"{pred_30d['change_percent']:+.1f}%"
         )
 
+def generate_daily_recommendations(popular_stocks):
+    """Generate daily stock recommendations with caching"""
+    recommendations = []
+    
+    # Create progress bar
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    
+    for i, symbol in enumerate(popular_stocks):
+        try:
+            status_text.text(f"Analyzing {symbol}...")
+            
+            # Get stock data
+            data = yf.download(symbol, period="3mo", interval="1d")
+            if data.empty:
+                continue
+                
+            # Calculate technical indicators
+            analyzer = TransparentStockAnalyzer()
+            df_with_indicators = analyzer.calculate_advanced_indicators(data)
+            
+            # Get current price
+            current_price = data['Close'].iloc[-1]
+            
+            # Calculate buy/sell signals
+            buy_signal = 0
+            sell_signal = 0
+            confidence = 0
+            
+            # RSI Analysis
+            if 'RSI' in df_with_indicators.columns:
+                rsi = df_with_indicators['RSI'].iloc[-1]
+                if rsi < 30:
+                    buy_signal += 2
+                    confidence += 20
+                elif rsi > 70:
+                    sell_signal += 2
+                    confidence += 20
+                elif 40 <= rsi <= 60:
+                    buy_signal += 1
+                    confidence += 10
+            
+            # MACD Analysis
+            if 'MACD' in df_with_indicators.columns and 'MACD_signal' in df_with_indicators.columns:
+                macd = df_with_indicators['MACD'].iloc[-1]
+                macd_signal = df_with_indicators['MACD_signal'].iloc[-1]
+                if macd > macd_signal:
+                    buy_signal += 2
+                    confidence += 15
+                else:
+                    sell_signal += 1
+                    confidence += 10
+            
+            # Moving Average Analysis
+            if 'SMA_20' in df_with_indicators.columns and 'SMA_50' in df_with_indicators.columns:
+                sma_20 = df_with_indicators['SMA_20'].iloc[-1]
+                sma_50 = df_with_indicators['SMA_50'].iloc[-1]
+                if current_price > sma_20 > sma_50:
+                    buy_signal += 2
+                    confidence += 15
+                elif current_price < sma_20 < sma_50:
+                    sell_signal += 2
+                    confidence += 15
+            
+            # Stochastic Analysis
+            if 'Stoch_K' in df_with_indicators.columns and 'Stoch_D' in df_with_indicators.columns:
+                stoch_k = df_with_indicators['Stoch_K'].iloc[-1]
+                stoch_d = df_with_indicators['Stoch_D'].iloc[-1]
+                if stoch_k < 20 and stoch_d < 20:
+                    buy_signal += 2
+                    confidence += 15
+                elif stoch_k > 80 and stoch_d > 80:
+                    sell_signal += 2
+                    confidence += 15
+                elif stoch_k > stoch_d:
+                    buy_signal += 1
+                    confidence += 10
+            
+            # Williams %R Analysis
+            if 'Williams_R' in df_with_indicators.columns:
+                williams_r = df_with_indicators['Williams_R'].iloc[-1]
+                if williams_r < -80:
+                    buy_signal += 2
+                    confidence += 15
+                elif williams_r > -20:
+                    sell_signal += 2
+                    confidence += 15
+            
+            # Volume Analysis
+            if 'Volume_Ratio' in df_with_indicators.columns:
+                vol_ratio = df_with_indicators['Volume_Ratio'].iloc[-1]
+                if vol_ratio > 1.5:
+                    buy_signal += 1
+                    confidence += 10
+                elif vol_ratio < 0.7:
+                    sell_signal += 1
+                    confidence += 5
+            
+            # Calculate recommendation
+            net_signal = buy_signal - sell_signal
+            confidence = min(confidence, 100)
+            
+            # Only include stocks with strong signals
+            if abs(net_signal) >= 3 and confidence >= 40:
+                # Calculate target prices
+                if net_signal > 0:
+                    recommendation = "BUY"
+                    target_price = current_price * (1 + (confidence / 1000))
+                    stop_loss = current_price * 0.95
+                    expected_return = ((target_price - current_price) / current_price) * 100
+                else:
+                    recommendation = "SELL"
+                    target_price = current_price * (1 - (confidence / 1000))
+                    stop_loss = current_price * 1.05
+                    expected_return = ((current_price - target_price) / current_price) * 100
+                
+                recommendations.append({
+                    'symbol': symbol.replace('.NS', ''),
+                    'current_price': current_price,
+                    'recommendation': recommendation,
+                    'target_price': target_price,
+                    'stop_loss': stop_loss,
+                    'confidence': confidence,
+                    'expected_return': expected_return,
+                    'net_signal': net_signal
+                })
+            
+            # Update progress
+            progress_bar.progress((i + 1) / len(popular_stocks))
+            
+        except Exception as e:
+            status_text.text(f"Error analyzing {symbol}: {str(e)}")
+            continue
+    
+    # Clear progress indicators
+    progress_bar.empty()
+    status_text.empty()
+    
+    return recommendations
+
+def get_daily_stock_recommendations():
+    """Get daily stock recommendations with buy/sell prices and profit predictions"""
+    
+    # Check current time and market status - ALWAYS IN IST
+    current_time = get_ist_time()  # This ensures we always use Indian Standard Time
+    current_hour = current_time.hour
+    current_minute = current_time.minute
+    is_weekend = current_time.weekday() >= 5  # 5=Saturday, 6=Sunday
+    
+    # Indian stock market hours: 9:15 AM to 3:30 PM IST
+    market_open_time = 9 * 60 + 15  # 9:15 AM in minutes
+    market_close_time = 15 * 60 + 30  # 3:30 PM in minutes
+    current_time_minutes = current_hour * 60 + current_minute
+    
+    # Determine market status
+    if is_weekend:
+        market_status = "⏰ Weekend - Market Closed"
+        status_color = "🔴"
+    elif current_time_minutes < market_open_time:
+        minutes_to_open = market_open_time - current_time_minutes
+        hours_to_open = minutes_to_open // 60
+        mins_to_open = minutes_to_open % 60
+        market_status = f"⏰ Pre-Market - Opens in {hours_to_open}h {mins_to_open}m"
+        status_color = "🟡"
+    elif current_time_minutes <= market_close_time:
+        market_status = "🟢 Market Open"
+        status_color = "🟢"
+    else:
+        market_status = "🔴 Market Closed - After Hours"
+        status_color = "🔴"
+    
+    # Popular Indian stocks for daily recommendations
+    popular_stocks = [
+        'RELIANCE.NS', 'TCS.NS', 'HDFCBANK.NS', 'INFY.NS', 'HINDUNILVR.NS',
+        'ICICIBANK.NS', 'KOTAKBANK.NS', 'BHARTIARTL.NS', 'ITC.NS', 'SBIN.NS',
+        'ASIANPAINT.NS', 'MARUTI.NS', 'AXISBANK.NS', 'LT.NS', 'NESTLEIND.NS',
+        'WIPRO.NS', 'ULTRACEMCO.NS', 'TITAN.NS', 'POWERGRID.NS', 'NTPC.NS'
+    ]
+    
+    recommendations = []
+    
+    # Display header with market status
+    st.markdown("## 📈 Daily Stock Recommendations")
+    st.markdown(f"**Date: {format_ist_time(current_time)} | {market_status}**")
+    
+    # Show timezone confirmation
+    st.markdown(f"🕐 **Current IST Time**: {current_time.strftime('%H:%M:%S')} | **Market Status**: {market_status}")
+    
+    # Show pre-market analysis message
+    if current_time_minutes < market_open_time and not is_weekend:
+        st.success("🌅 **Perfect Timing!** Get your stock picks before market opens at 9:15 AM")
+        st.info("💡 **Pro Tip:** Review these recommendations now and place your orders when market opens!")
+        
+        # Show countdown to market open
+        minutes_to_open = market_open_time - current_time_minutes
+        hours_to_open = minutes_to_open // 60
+        mins_to_open = minutes_to_open % 60
+        
+        st.markdown(f"""
+        <div style='background: linear-gradient(90deg, #ff6b6b, #ffa726); padding: 15px; border-radius: 10px; text-align: center; color: white; margin: 10px 0;'>
+            <h3 style='margin: 0;'>⏰ Market Opens In: {hours_to_open}h {mins_to_open}m</h3>
+            <p style='margin: 5px 0 0 0;'>Best time to review and prepare your trades!</p>
+        </div>
+        """, unsafe_allow_html=True)
+        
+    elif is_weekend:
+        st.info("📅 **Weekend Analysis** - Prepare for Monday's trading session")
+        
+        # Show next market open time
+        if current_time.weekday() == 5:  # Saturday
+            next_market = "Monday"
+        else:  # Sunday
+            next_market = "Monday"
+            
+        st.markdown(f"""
+        <div style='background: linear-gradient(90deg, #4dabf7, #69db7c); padding: 15px; border-radius: 10px; text-align: center; color: white; margin: 10px 0;'>
+            <h3 style='margin: 0;'>📅 Next Trading Day: {next_market}</h3>
+            <p style='margin: 5px 0 0 0;'>Great time to research and plan your strategy!</p>
+        </div>
+        """, unsafe_allow_html=True)
+        
+    elif current_time_minutes > market_close_time:
+        st.warning("🌙 **After-Hours Analysis** - Plan for tomorrow's session")
+        
+        # Show tomorrow's market open
+        st.markdown(f"""
+        <div style='background: linear-gradient(90deg, #9775fa, #748ffc); padding: 15px; border-radius: 10px; text-align: center; color: white; margin: 10px 0;'>
+            <h3 style='margin: 0;'>🌅 Tomorrow's Market Opens at 9:15 AM</h3>
+            <p style='margin: 5px 0 0 0;'>Review tonight, execute tomorrow morning!</p>
+        </div>
+        """, unsafe_allow_html=True)
+    else:
+        # Market is open
+        st.success("🟢 **Market is Open** - Live trading in progress!")
+        
+        st.markdown(f"""
+        <div style='background: linear-gradient(90deg, #51cf66, #40c057); padding: 15px; border-radius: 10px; text-align: center; color: white; margin: 10px 0;'>
+            <h3 style='margin: 0;'>🚀 Markets are Live!</h3>
+            <p style='margin: 5px 0 0 0;'>Execute your trades now - Market closes at 3:30 PM</p>
+        </div>
+        """, unsafe_allow_html=True)
+    
+    # Add refresh button for real-time updates
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col2:
+        refresh_recommendations = st.button("🔄 Refresh Recommendations", type="secondary", help="Get latest analysis")
+    
+    # Auto-refresh option for pre-market users
+    if current_time_minutes < market_open_time and not is_weekend:
+        auto_refresh = st.checkbox("🔄 Auto-refresh every 5 minutes (Pre-market mode)", 
+                                  help="Keep recommendations updated before market opens")
+        if auto_refresh:
+            st.rerun()  # This will refresh the app every time it runs
+    
+    st.markdown("---")
+    
+    # Cache recommendations for the day to avoid recomputation
+    cache_key = f"recommendations_{current_time.strftime('%Y-%m-%d')}"
+    
+    # Use session state to cache recommendations
+    if cache_key not in st.session_state or refresh_recommendations:
+        with st.spinner("🔍 Analyzing stocks for today's recommendations..."):
+            st.session_state[cache_key] = generate_daily_recommendations(popular_stocks)
+    
+    recommendations = st.session_state[cache_key]
+    
+    # Display recommendations
+    if recommendations:
+        st.success(f"Found {len(recommendations)} strong recommendations for today!")
+        
+        # Create columns for better layout
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            st.metric("Total Recommendations", len(recommendations))
+        with col2:
+            buy_count = len([r for r in recommendations if r['recommendation'] == 'BUY'])
+            st.metric("Buy Signals", buy_count)
+        with col3:
+            sell_count = len([r for r in recommendations if r['recommendation'] == 'SELL'])
+            st.metric("Sell Signals", sell_count)
+        
+        st.markdown("---")
+        
+        # Display each recommendation
+        for i, rec in enumerate(recommendations[:10]):  # Show top 10
+            with st.expander(f"📊 {rec['symbol']} - {rec['recommendation']} | Confidence: {rec['confidence']:.1f}%"):
+                col1, col2, col3 = st.columns(3)
+                
+                with col1:
+                    st.write(f"**Current Price:** ₹{rec['current_price']:.2f}")
+                    st.write(f"**Target Price:** ₹{rec['target_price']:.2f}")
+                    st.write(f"**Stop Loss:** ₹{rec['stop_loss']:.2f}")
+                
+                with col2:
+                    st.write(f"**Expected Return:** {rec['expected_return']:+.1f}%")
+                    st.write(f"**Confidence:** {rec['confidence']:.1f}%")
+                    st.write(f"**Signal Strength:** {rec['net_signal']}")
+                
+                with col3:
+                    if rec['recommendation'] == 'BUY':
+                        st.success(f"🟢 **{rec['recommendation']}**")
+                    else:
+                        st.error(f"🔴 **{rec['recommendation']}**")
+                    
+                    # Calculate potential profit/loss
+                    if rec['recommendation'] == 'BUY':
+                        potential_profit = rec['target_price'] - rec['current_price']
+                        st.write(f"**Potential Profit:** ₹{potential_profit:.2f}")
+                    else:
+                        potential_profit = rec['current_price'] - rec['target_price']
+                        st.write(f"**Potential Profit:** ₹{potential_profit:.2f}")
+    
+    else:
+        st.warning("No strong recommendations found for today. Market conditions may be neutral.")
+        st.info("Try checking back later or analyze individual stocks using the main analysis tool.")
+    
+    # Market summary
+    st.markdown("### 📊 Market Summary")
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        market_sentiment = "Bullish" if len([r for r in recommendations if r['recommendation'] == 'BUY']) > len([r for r in recommendations if r['recommendation'] == 'SELL']) else "Bearish"
+        sentiment_color = "🟢" if market_sentiment == "Bullish" else "🔴"
+        st.metric("Market Sentiment", f"{sentiment_color} {market_sentiment}")
+    
+    with col2:
+        avg_confidence = sum(r['confidence'] for r in recommendations) / len(recommendations) if recommendations else 0
+        st.metric("Average Confidence", f"{avg_confidence:.1f}%")
+    
+    with col3:
+        avg_return = sum(abs(r['expected_return']) for r in recommendations) / len(recommendations) if recommendations else 0
+        st.metric("Average Expected Return", f"{avg_return:.1f}%")
+    
+    # Add timing recommendations
+    st.markdown("### ⏰ Best Times to Check Recommendations")
+    timing_col1, timing_col2, timing_col3 = st.columns(3)
+    
+    with timing_col1:
+        st.markdown("""
+        **🌅 Pre-Market (7:00 AM - 9:15 AM)**
+        - ✅ Best time for analysis
+        - ✅ Plan your trades
+        - ✅ Set limit orders
+        """)
+    
+    with timing_col2:
+        st.markdown("""
+        **🔥 Market Hours (9:15 AM - 3:30 PM)**
+        - ⚡ Execute trades
+        - 📊 Monitor positions
+        - 🔄 Adjust strategies
+        """)
+    
+    with timing_col3:
+        st.markdown("""
+        **🌙 After Hours (3:30 PM onwards)**
+        - 📈 Review performance
+        - 📚 Research for tomorrow
+        - 📝 Plan next day strategy
+        """)
+    
+    # Add disclaimer with emphasis on pre-market preparation
+    st.markdown("---")
+    st.markdown("### 📝 Important Notes")
+    st.warning("""
+    **⚠️ For Best Results:**
+    
+    🕰️ **Check recommendations between 7:00 AM - 9:00 AM** for optimal pre-market analysis
+    
+    📋 **Pre-Market Checklist:**
+    - Review all recommendations
+    - Set your risk management (stop losses)
+    - Prepare your trading capital
+    - Plan your position sizes
+    - Set price alerts
+    
+    🎯 **Remember:** Markets open at 9:15 AM sharp - be ready!
+    """)
+
 def main():
     st.set_page_config(
         page_title="AI Stock Predictor", 
         layout="wide",
         page_icon="📈"
     )
+    
+    # Navigation sidebar
+    st.sidebar.title("📈 AI Stock Predictor")
+    st.sidebar.markdown("---")
+    
+    # Page selection
+    page = st.sidebar.selectbox(
+        "Choose Analysis Type",
+        ["Individual Stock Analysis", "Daily Stock Recommendations"],
+        help="Select the type of analysis you want to perform"
+    )
+    
+    st.sidebar.markdown("---")
+    
+    # If daily recommendations page is selected
+    if page == "Daily Stock Recommendations":
+        get_daily_stock_recommendations()
+        return
     
     # Header with clean design
     st.markdown("""
@@ -3424,7 +3855,7 @@ def main():
             st.markdown(f"""
             <div style='padding: 1rem; background-color: #f8f9fa; border-left: 4px solid #007bff; border-radius: 5px;'>
                 <h5 style='color: #007bff; margin-top: 0;'>What the Charts Are Telling Us:</h5>
-                <p style='margin-bottom: 0; color: #000000;'>{llm_chart_analysis}</p>
+                <p style='margin-bottom: 0;'>{llm_chart_analysis}</p>
             </div>
             """, unsafe_allow_html=True)
         
@@ -3558,7 +3989,7 @@ def main():
     
     with col3:
         st.markdown("**🔄 Last Updated**")
-        st.write(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        st.write(f"{format_ist_time()} IST")
 
 if __name__ == "__main__":
     main()
