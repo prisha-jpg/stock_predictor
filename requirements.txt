@@ -1,0 +1,48 @@
+# Core dependencies
+streamlit
+pandas
+numpy
+
+# Data fetching and analysis
+yfinance
+requests
+
+# Machine learning and technical analysis
+scikit-learn
+ta
+
+# Visualization
+plotly
+
+# Document processing (for file.py)
+PyPDF2
+python-docx
+Pillow
+pytesseract
+
+# AI and API clients
+groq>=0.4.1
+tavily-python
+newsapi-python
+
+# RSS feeds
+feedparser
+
+# Environment management
+python-dotenv
+
+# Additional ML libraries (optional, used in some advanced features)
+# Uncomment if you need these specific models:
+# xgboost
+# lightgbm
+
+# Web scraping (if needed)
+beautifulsoup4
+lxml
+
+# Excel file handling
+openpyxl
+xlsxwriter
+
+# Additional utilities
+typing-extensions
