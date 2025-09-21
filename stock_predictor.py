@@ -705,13 +705,15 @@ class TransparentStockAnalyzer:
             
             # Custom composite indicators
             df['Momentum_Score'] = (
-                (df['RSI'] - 50) / 50 * 0.2 +
-                np.where(df['MACD'] > df['MACD_signal'], 1, -1) * 0.2 +
-                np.where(df['Close'] > df['SMA_20'], 1, -1) * 0.2 +
+                (df['RSI'] - 50) / 50 * 0.15 +
+                np.where(df['MACD'] > df['MACD_signal'], 1, -1) * 0.15 +
+                np.where(df['Close'] > df['SMA_20'], 1, -1) * 0.15 +
                 (df['CCI'] / 100) * 0.1 +
                 (df['TSI'] / 100) * 0.1 +
                 (df['UO'] - 50) / 50 * 0.1 +
-                (df['AO'] / 100) * 0.1
+                (df['AO'] / 100) * 0.1 +
+                (df['Stoch_K'] - 50) / 50 * 0.075 +
+                (df['Williams_R'] + 50) / 50 * 0.075
             ) if 'MACD' in df.columns else 0
             
             df['Volatility_Score'] = (df['ATR'] / df['Close'] * 100) if 'ATR' in df.columns else df['Volatility']
@@ -1101,6 +1103,43 @@ class TransparentStockAnalyzer:
                     technical_score -= 0.05
                     technical_reasons.append(f"⚠️ Low volume ({vol_ratio:.1f}x average) - Weak participation")
             
+            # Stochastic Oscillator Analysis
+            if 'Stoch_K' in df.columns and 'Stoch_D' in df.columns:
+                stoch_k = df['Stoch_K'].iloc[-1]
+                stoch_d = df['Stoch_D'].iloc[-1]
+                
+                # Stochastic %K and %D analysis
+                if stoch_k < 20 and stoch_d < 20:
+                    technical_score += 0.15
+                    technical_reasons.append(f"✅ Stochastic oversold (K:{stoch_k:.1f}, D:{stoch_d:.1f}) - Potential reversal")
+                elif stoch_k > 80 and stoch_d > 80:
+                    technical_score -= 0.15
+                    technical_reasons.append(f"❌ Stochastic overbought (K:{stoch_k:.1f}, D:{stoch_d:.1f}) - Correction risk")
+                elif stoch_k > stoch_d:
+                    technical_score += 0.05
+                    technical_reasons.append(f"✅ Stochastic bullish crossover (K:{stoch_k:.1f} > D:{stoch_d:.1f})")
+                elif stoch_k < stoch_d:
+                    technical_score -= 0.05
+                    technical_reasons.append(f"❌ Stochastic bearish crossover (K:{stoch_k:.1f} < D:{stoch_d:.1f})")
+                else:
+                    technical_reasons.append(f"⚪ Stochastic neutral (K:{stoch_k:.1f}, D:{stoch_d:.1f})")
+            
+            # Williams %R Analysis
+            if 'Williams_R' in df.columns:
+                williams_r = df['Williams_R'].iloc[-1]
+                
+                if williams_r < -80:
+                    technical_score += 0.1
+                    technical_reasons.append(f"✅ Williams %R oversold ({williams_r:.1f}) - Potential bounce")
+                elif williams_r > -20:
+                    technical_score -= 0.1
+                    technical_reasons.append(f"❌ Williams %R overbought ({williams_r:.1f}) - Correction risk")
+                elif -50 <= williams_r <= -30:
+                    technical_score += 0.03
+                    technical_reasons.append(f"⚪ Williams %R neutral ({williams_r:.1f}) - Moderate momentum")
+                else:
+                    technical_reasons.append(f"⚪ Williams %R ({williams_r:.1f}) - Momentum indicator")
+            
             self.log_analysis("TECHNICAL_ANALYSIS", f"Technical Score: {technical_score:.3f}", 
                 f"Based on {len(technical_reasons)} technical factors")
             
@@ -1259,7 +1298,7 @@ class TransparentStockAnalyzer:
                 # Make prediction with best model
                 try:
                     feature_columns = [col for col in ['SMA_10', 'SMA_20', 'SMA_50', 'RSI', 'MACD', 'BB_position',
-                                                     'Volume_Ratio', 'Volatility', 'Momentum_Score'] if col in df.columns]
+                                                     'Volume_Ratio', 'Volatility', 'Momentum_Score', 'Stoch_K', 'Stoch_D', 'Williams_R'] if col in df.columns]
                     
                     if len(feature_columns) >= 3:
                         latest_features = df[feature_columns].iloc[-1:].fillna(0)
@@ -1796,24 +1835,334 @@ class TransparentStockAnalyzer:
                 'world_score': 0
             }
 
+def create_individual_charts(data: pd.DataFrame, fundamentals: Dict, patterns: Dict, title: str):
+    """Create separate individual charts with individual zoom functionality"""
+    
+    # Define systematic color palette
+    colors = {
+        'primary': '#1f77b4',      # Blue
+        'secondary': '#ff7f0e',    # Orange
+        'success': '#2ca02c',      # Green
+        'danger': '#d62728',       # Red
+        'warning': '#ff7f0e',      # Orange
+        'info': '#17a2b8',         # Cyan
+        'purple': '#9467bd',       # Purple
+        'brown': '#8c564b',        # Brown
+        'pink': '#e377c2',         # Pink
+        'gray': '#7f7f7f',         # Gray
+        'olive': '#bcbd22',        # Olive
+        'teal': '#17becf'          # Teal
+    }
+    
+    charts = {}
+    
+    # 1. Price Action Chart
+    price_chart = go.Figure()
+    price_chart.add_trace(go.Candlestick(
+        x=data.index,
+        open=data['Open'],
+        high=data['High'],
+        low=data['Low'],
+        close=data['Close'],
+        name='Price',
+        increasing_line_color=colors['success'],
+        decreasing_line_color=colors['danger']
+    ))
+    
+    # Add key levels if available
+    if patterns and 'key_levels' in patterns:
+        for level in patterns['key_levels'][:3]:
+            color = colors['danger'] if level['type'] == 'resistance' else colors['success']
+            price_chart.add_hline(y=level['level'], line_dash="dash", line_color=color, 
+                                annotation_text=f"{level['type'].title()}: ₹{level['level']:.1f}")
+    
+    price_chart.update_layout(
+        title="Price Action & Key Levels",
+        height=400,
+        xaxis_rangeslider_visible=False,
+        showlegend=True,
+        plot_bgcolor='rgba(0,0,0,0)',
+        paper_bgcolor='rgba(0,0,0,0)'
+    )
+    charts['price'] = price_chart
+    
+    # 2. Volume Chart
+    volume_chart = go.Figure()
+    volume_chart.add_trace(go.Bar(
+        x=data.index, y=data['Volume'],
+        name='Volume', 
+        marker_color=colors['info'],
+        opacity=0.7
+    ))
+    
+    if 'Volume_SMA' in data.columns:
+        volume_chart.add_trace(go.Scatter(
+            x=data.index, y=data['Volume_SMA'],
+            name='Volume MA', 
+            line=dict(color=colors['warning'], width=2)
+        ))
+    
+    volume_chart.update_layout(
+        title="Volume Analysis",
+        height=400,
+        showlegend=True,
+        plot_bgcolor='rgba(0,0,0,0)',
+        paper_bgcolor='rgba(0,0,0,0)'
+    )
+    charts['volume'] = volume_chart
+    
+    # 3. RSI Chart
+    if 'RSI' in data.columns:
+        rsi_chart = go.Figure()
+        rsi_chart.add_trace(go.Scatter(
+            x=data.index, y=data['RSI'],
+            name='RSI', 
+            line=dict(color=colors['purple'], width=2)
+        ))
+        rsi_chart.add_hline(y=70, line_dash="dash", line_color=colors['danger'], 
+                           annotation_text="Overbought (70)")
+        rsi_chart.add_hline(y=30, line_dash="dash", line_color=colors['success'],
+                           annotation_text="Oversold (30)")
+        rsi_chart.add_hline(y=50, line_dash="dot", line_color=colors['gray'])
+        
+        rsi_chart.update_layout(
+            title="RSI Momentum",
+            height=400,
+            yaxis=dict(range=[0, 100]),
+            showlegend=True,
+            plot_bgcolor='rgba(0,0,0,0)',
+            paper_bgcolor='rgba(0,0,0,0)'
+        )
+        charts['rsi'] = rsi_chart
+    
+    # 4. MACD Chart
+    if 'MACD' in data.columns:
+        macd_chart = go.Figure()
+        macd_chart.add_trace(go.Scatter(
+            x=data.index, y=data['MACD'],
+            name='MACD', 
+            line=dict(color=colors['primary'], width=2)
+        ))
+        if 'MACD_signal' in data.columns:
+            macd_chart.add_trace(go.Scatter(
+                x=data.index, y=data['MACD_signal'],
+                name='MACD Signal', 
+                line=dict(color=colors['danger'], width=2)
+            ))
+        if 'MACD_histogram' in data.columns:
+            macd_chart.add_trace(go.Bar(
+                x=data.index, y=data['MACD_histogram'],
+                name='MACD Histogram',
+                marker_color=colors['teal'],
+                opacity=0.6
+            ))
+        
+        macd_chart.update_layout(
+            title="MACD Signal",
+            height=400,
+            showlegend=True,
+            plot_bgcolor='rgba(0,0,0,0)',
+            paper_bgcolor='rgba(0,0,0,0)'
+        )
+        charts['macd'] = macd_chart
+    
+    # 5. Moving Averages Chart
+    ma_chart = go.Figure()
+    ma_colors = [colors['warning'], colors['danger'], colors['primary']]
+    ma_columns = ['SMA_20', 'SMA_50', 'SMA_200']
+    for i, ma_col in enumerate(ma_columns):
+        if ma_col in data.columns:
+            ma_chart.add_trace(go.Scatter(
+                x=data.index, y=data[ma_col],
+                name=ma_col, 
+                line=dict(color=ma_colors[i], width=2)
+            ))
+    
+    ma_chart.add_trace(go.Scatter(
+        x=data.index, y=data['Close'],
+        name='Close Price', 
+        line=dict(color=colors['gray'], width=2)
+    ))
+    
+    ma_chart.update_layout(
+        title="Moving Averages & Trends",
+        height=400,
+        showlegend=True,
+        plot_bgcolor='rgba(0,0,0,0)',
+        paper_bgcolor='rgba(0,0,0,0)'
+    )
+    charts['moving_averages'] = ma_chart
+    
+    # 6. Bollinger Bands Chart
+    if all(col in data.columns for col in ['BB_upper', 'BB_middle', 'BB_lower']):
+        bb_chart = go.Figure()
+        bb_chart.add_trace(go.Scatter(
+            x=data.index, y=data['BB_upper'],
+            name='BB Upper', 
+            line=dict(color=colors['danger'], dash='dash', width=2)
+        ))
+        bb_chart.add_trace(go.Scatter(
+            x=data.index, y=data['BB_middle'],
+            name='BB Middle', 
+            line=dict(color=colors['primary'], width=2)
+        ))
+        bb_chart.add_trace(go.Scatter(
+            x=data.index, y=data['BB_lower'],
+            name='BB Lower', 
+            line=dict(color=colors['success'], dash='dash', width=2)
+        ))
+        bb_chart.add_trace(go.Scatter(
+            x=data.index, y=data['Close'],
+            name='Price', 
+            line=dict(color=colors['gray'], width=2)
+        ))
+        
+        bb_chart.update_layout(
+            title="Bollinger Bands",
+            height=400,
+            showlegend=True,
+            plot_bgcolor='rgba(0,0,0,0)',
+            paper_bgcolor='rgba(0,0,0,0)'
+        )
+        charts['bollinger'] = bb_chart
+    
+    # 7. Stochastic Oscillator Chart
+    if 'Stoch_K' in data.columns and 'Stoch_D' in data.columns:
+        stoch_chart = go.Figure()
+        stoch_chart.add_trace(go.Scatter(
+            x=data.index, y=data['Stoch_K'],
+            name='Stoch %K', 
+            line=dict(color=colors['primary'], width=2)
+        ))
+        stoch_chart.add_trace(go.Scatter(
+            x=data.index, y=data['Stoch_D'],
+            name='Stoch %D', 
+            line=dict(color=colors['danger'], width=2)
+        ))
+        
+        stoch_chart.add_hline(y=80, line_dash="dash", line_color=colors['danger'], 
+                             annotation_text="Overbought (80)")
+        stoch_chart.add_hline(y=20, line_dash="dash", line_color=colors['success'],
+                             annotation_text="Oversold (20)")
+        stoch_chart.add_hline(y=50, line_dash="dot", line_color=colors['gray'])
+        
+        stoch_chart.update_layout(
+            title="Stochastic Oscillator",
+            height=400,
+            yaxis=dict(range=[0, 100]),
+            showlegend=True,
+            plot_bgcolor='rgba(0,0,0,0)',
+            paper_bgcolor='rgba(0,0,0,0)'
+        )
+        charts['stochastic'] = stoch_chart
+    
+    # 8. Williams %R Chart
+    if 'Williams_R' in data.columns:
+        williams_chart = go.Figure()
+        williams_chart.add_trace(go.Scatter(
+            x=data.index, y=data['Williams_R'],
+            name='Williams %R', 
+            line=dict(color=colors['purple'], width=2)
+        ))
+        
+        williams_chart.add_hline(y=-20, line_dash="dash", line_color=colors['danger'],
+                                annotation_text="Overbought (-20)")
+        williams_chart.add_hline(y=-80, line_dash="dash", line_color=colors['success'],
+                                annotation_text="Oversold (-80)")
+        williams_chart.add_hline(y=-50, line_dash="dot", line_color=colors['gray'])
+        
+        williams_chart.update_layout(
+            title="Williams %R",
+            height=400,
+            yaxis=dict(range=[-100, 0]),
+            showlegend=True,
+            plot_bgcolor='rgba(0,0,0,0)',
+            paper_bgcolor='rgba(0,0,0,0)'
+        )
+        charts['williams'] = williams_chart
+    
+    # 9. Volatility Chart
+    if 'Volatility' in data.columns:
+        vol_chart = go.Figure()
+        vol_chart.add_trace(go.Scatter(
+            x=data.index, y=data['Volatility'] * 100,
+            name='Volatility %', 
+            line=dict(color=colors['warning'], width=2)
+        ))
+        
+        vol_chart.update_layout(
+            title="Volatility Analysis",
+            height=400,
+            showlegend=True,
+            plot_bgcolor='rgba(0,0,0,0)',
+            paper_bgcolor='rgba(0,0,0,0)'
+        )
+        charts['volatility'] = vol_chart
+    
+    # 10. Performance Chart
+    if patterns and 'performance' in patterns:
+        perf_chart = go.Figure()
+        performance_data = patterns['performance']
+        periods = list(performance_data.keys())
+        returns = list(performance_data.values())
+        
+        bar_colors = [colors['success'] if r > 0 else colors['danger'] for r in returns]
+        perf_chart.add_trace(go.Bar(
+            x=periods, y=returns,
+            name='Returns %', 
+            marker_color=bar_colors,
+            opacity=0.8
+        ))
+        
+        perf_chart.update_layout(
+            title="Historical Performance",
+            height=400,
+            showlegend=True,
+            plot_bgcolor='rgba(0,0,0,0)',
+            paper_bgcolor='rgba(0,0,0,0)'
+        )
+        charts['performance'] = perf_chart
+    
+    return charts
+
 def create_comprehensive_charts(data: pd.DataFrame, fundamentals: Dict, patterns: Dict, title: str):
-    """Create detailed transparent charts with improved spacing"""
+    """Create detailed transparent charts with improved spacing and systematic color scheme"""
+    
+    # Define systematic color palette
+    colors = {
+        'primary': '#1f77b4',      # Blue
+        'secondary': '#ff7f0e',    # Orange
+        'success': '#2ca02c',      # Green
+        'danger': '#d62728',       # Red
+        'warning': '#ff7f0e',      # Orange
+        'info': '#17a2b8',         # Cyan
+        'purple': '#9467bd',       # Purple
+        'brown': '#8c564b',        # Brown
+        'pink': '#e377c2',         # Pink
+        'gray': '#7f7f7f',         # Gray
+        'olive': '#bcbd22',        # Olive
+        'teal': '#17becf'          # Teal
+    }
+    
     fig = make_subplots(
-        rows=5, cols=2,
+        rows=6, cols=2,
         subplot_titles=(
             'Price Action & Key Levels', 'Volume Analysis',
-            'RSI & MACD', 'Moving Averages & Trends', 
-            'Bollinger Bands & Volatility', 'Fundamental Metrics',
+            'RSI Momentum', 'MACD Signal', 
+            'Moving Averages & Trends', 'Bollinger Bands',
+            'Stochastic Oscillator', 'Williams %R',
+            'Volatility Analysis', 'Fundamental Metrics',
             'Historical Performance', 'Prediction Confidence'
         ),
-        vertical_spacing=0.08,  # Increased from 0.03 to 0.08
-        horizontal_spacing=0.12,  # Increased from 0.05 to 0.12
+        vertical_spacing=0.05,
+        horizontal_spacing=0.08,
         specs=[[{"secondary_y": True}, {"secondary_y": False}],
                [{"secondary_y": False}, {"secondary_y": False}],
                [{"secondary_y": False}, {"secondary_y": False}],
                [{"secondary_y": False}, {"secondary_y": False}],
+               [{"secondary_y": False}, {"secondary_y": False}],
                [{"colspan": 2}, None]],
-        row_heights=[0.25, 0.2, 0.2, 0.2, 0.15]
+        row_heights=[0.18, 0.15, 0.15, 0.15, 0.15, 0.22]
     )
     
     # Price action with candlesticks
@@ -1824,7 +2173,9 @@ def create_comprehensive_charts(data: pd.DataFrame, fundamentals: Dict, patterns
         low=data['Low'],
         close=data['Close'],
         name='Price',
-        showlegend=False
+        showlegend=False,
+        increasing_line_color=colors['success'],
+        decreasing_line_color=colors['danger']
     ), row=1, col=1)
     
     # Add key levels if available
@@ -1837,52 +2188,71 @@ def create_comprehensive_charts(data: pd.DataFrame, fundamentals: Dict, patterns
     # Volume
     fig.add_trace(go.Bar(
         x=data.index, y=data['Volume'],
-        name='Volume', opacity=0.6
+        name='Volume', 
+        marker_color=colors['info'],
+        opacity=0.7
     ), row=1, col=2)
     
     # Volume moving average
     if 'Volume_SMA' in data.columns:
         fig.add_trace(go.Scatter(
             x=data.index, y=data['Volume_SMA'],
-            name='Volume MA', line=dict(color='orange')
+            name='Volume MA', 
+            line=dict(color=colors['warning'], width=2)
         ), row=1, col=2)
     
     # RSI
     if 'RSI' in data.columns:
         fig.add_trace(go.Scatter(
             x=data.index, y=data['RSI'],
-            name='RSI', line=dict(color='purple')
+            name='RSI', 
+            line=dict(color=colors['purple'], width=2)
         ), row=2, col=1)
-        fig.add_hline(y=70, line_dash="dash", line_color="red", row=2, col=1)
-        fig.add_hline(y=30, line_dash="dash", line_color="green", row=2, col=1)
-        fig.add_hline(y=50, line_dash="dot", line_color="gray", row=2, col=1)
+        fig.add_hline(y=70, line_dash="dash", line_color=colors['danger'], row=2, col=1, 
+                     annotation_text="Overbought (70)")
+        fig.add_hline(y=30, line_dash="dash", line_color=colors['success'], row=2, col=1,
+                     annotation_text="Oversold (30)")
+        fig.add_hline(y=50, line_dash="dot", line_color=colors['gray'], row=2, col=1)
+        fig.update_yaxes(range=[0, 100], row=2, col=1)
     
     # MACD
     if 'MACD' in data.columns:
         fig.add_trace(go.Scatter(
             x=data.index, y=data['MACD'],
-            name='MACD', line=dict(color='blue')
+            name='MACD', 
+            line=dict(color=colors['primary'], width=2)
         ), row=2, col=2)
         if 'MACD_signal' in data.columns:
             fig.add_trace(go.Scatter(
                 x=data.index, y=data['MACD_signal'],
-                name='MACD Signal', line=dict(color='red')
+                name='MACD Signal', 
+                line=dict(color=colors['danger'], width=2)
+            ), row=2, col=2)
+        # Add histogram if available
+        if 'MACD_histogram' in data.columns:
+            fig.add_trace(go.Bar(
+                x=data.index, y=data['MACD_histogram'],
+                name='MACD Histogram',
+                marker_color=colors['teal'],
+                opacity=0.6
             ), row=2, col=2)
     
     # Moving averages
-    ma_colors = ['orange', 'red', 'blue']
+    ma_colors = [colors['warning'], colors['danger'], colors['primary']]
     ma_columns = ['SMA_20', 'SMA_50', 'SMA_200']
     for i, ma_col in enumerate(ma_columns):
         if ma_col in data.columns:
             fig.add_trace(go.Scatter(
                 x=data.index, y=data[ma_col],
-                name=ma_col, line=dict(color=ma_colors[i], width=2)
+                name=ma_col, 
+                line=dict(color=ma_colors[i], width=2)
             ), row=3, col=1)
     
     # Price line for comparison
     fig.add_trace(go.Scatter(
         x=data.index, y=data['Close'],
-        name='Close Price', line=dict(color='black', width=1)
+        name='Close Price', 
+        line=dict(color=colors['gray'], width=2)
     ), row=3, col=1)
     
     # Trend direction indicator
@@ -1900,27 +2270,32 @@ def create_comprehensive_charts(data: pd.DataFrame, fundamentals: Dict, patterns
     if all(col in data.columns for col in ['BB_upper', 'BB_middle', 'BB_lower']):
         fig.add_trace(go.Scatter(
             x=data.index, y=data['BB_upper'],
-            name='BB Upper', line=dict(color='red', dash='dash')
+            name='BB Upper', 
+            line=dict(color=colors['danger'], dash='dash', width=2)
         ), row=3, col=2)
         fig.add_trace(go.Scatter(
             x=data.index, y=data['BB_middle'],
-            name='BB Middle', line=dict(color='blue')
+            name='BB Middle', 
+            line=dict(color=colors['primary'], width=2)
         ), row=3, col=2)
         fig.add_trace(go.Scatter(
             x=data.index, y=data['BB_lower'],
-            name='BB Lower', line=dict(color='green', dash='dash')
+            name='BB Lower', 
+            line=dict(color=colors['success'], dash='dash', width=2)
         ), row=3, col=2)
         fig.add_trace(go.Scatter(
             x=data.index, y=data['Close'],
-            name='Price', line=dict(color='black', width=2)
+            name='Price', 
+            line=dict(color=colors['gray'], width=2)
         ), row=3, col=2)
     
     # Volatility
     if 'Volatility' in data.columns:
         fig.add_trace(go.Scatter(
             x=data.index, y=data['Volatility'] * 100,
-            name='Volatility %', line=dict(color='orange')
-        ), row=4, col=1)
+            name='Volatility %', 
+            line=dict(color=colors['warning'], width=2)
+        ), row=5, col=1)
     
     # Performance comparison
     if patterns and 'performance' in patterns:
@@ -1928,11 +2303,50 @@ def create_comprehensive_charts(data: pd.DataFrame, fundamentals: Dict, patterns
         periods = list(performance_data.keys())
         returns = list(performance_data.values())
         
-        colors = ['green' if r > 0 else 'red' for r in returns]
+        bar_colors = [colors['success'] if r > 0 else colors['danger'] for r in returns]
         fig.add_trace(go.Bar(
             x=periods, y=returns,
-            name='Returns %', marker_color=colors
+            name='Returns %', 
+            marker_color=bar_colors,
+            opacity=0.8
+        ), row=5, col=2)
+    
+    # Stochastic Oscillator
+    if 'Stoch_K' in data.columns and 'Stoch_D' in data.columns:
+        fig.add_trace(go.Scatter(
+            x=data.index, y=data['Stoch_K'],
+            name='Stoch %K', 
+            line=dict(color=colors['primary'], width=2)
+        ), row=4, col=1)
+        fig.add_trace(go.Scatter(
+            x=data.index, y=data['Stoch_D'],
+            name='Stoch %D', 
+            line=dict(color=colors['danger'], width=2)
+        ), row=4, col=1)
+        
+        # Add overbought/oversold lines
+        fig.add_hline(y=80, line_dash="dash", line_color=colors['danger'], row=4, col=1, 
+                     annotation_text="Overbought (80)")
+        fig.add_hline(y=20, line_dash="dash", line_color=colors['success'], row=4, col=1,
+                     annotation_text="Oversold (20)")
+        fig.add_hline(y=50, line_dash="dot", line_color=colors['gray'], row=4, col=1)
+        fig.update_yaxes(range=[0, 100], row=4, col=1)
+    
+    # Williams %R
+    if 'Williams_R' in data.columns:
+        fig.add_trace(go.Scatter(
+            x=data.index, y=data['Williams_R'],
+            name='Williams %R', 
+            line=dict(color=colors['purple'], width=2)
         ), row=4, col=2)
+        
+        # Add overbought/oversold lines for Williams %R
+        fig.add_hline(y=-20, line_dash="dash", line_color=colors['danger'], row=4, col=2,
+                     annotation_text="Overbought (-20)")
+        fig.add_hline(y=-80, line_dash="dash", line_color=colors['success'], row=4, col=2,
+                     annotation_text="Oversold (-80)")
+        fig.add_hline(y=-50, line_dash="dot", line_color=colors['gray'], row=4, col=2)
+        fig.update_yaxes(range=[-100, 0], row=4, col=2)
     
     # Overall summary in bottom panel
     summary_text = f"""
@@ -1959,12 +2373,34 @@ def create_comprehensive_charts(data: pd.DataFrame, fundamentals: Dict, patterns
         borderwidth=1
     )
     
+    # Update layout with systematic styling
     fig.update_layout(
-        title=title,
-        height=1400,  # Increased from 1200 to 1400 for better spacing
+        title={
+            'text': title,
+            'x': 0.5,
+            'xanchor': 'center',
+            'font': {'size': 20, 'color': colors['gray']}
+        },
+        height=1800,  # Increased to accommodate 6 rows with better spacing
         showlegend=True,
-        xaxis_rangeslider_visible=False
+        xaxis_rangeslider_visible=False,
+        plot_bgcolor='rgba(0,0,0,0)',
+        paper_bgcolor='rgba(0,0,0,0)',
+        font=dict(family="Arial", size=12),
+        legend=dict(
+            orientation="v",
+            yanchor="top",
+            y=1,
+            xanchor="left",
+            x=1.02
+        )
     )
+    
+    # Update all subplot axes for consistency
+    for i in range(1, 7):
+        for j in range(1, 3):
+            fig.update_xaxes(showgrid=True, gridwidth=1, gridcolor='rgba(128,128,128,0.2)', row=i, col=j)
+            fig.update_yaxes(showgrid=True, gridwidth=1, gridcolor='rgba(128,128,128,0.2)', row=i, col=j)
     
     return fig
 
@@ -2869,12 +3305,27 @@ def main():
         if show_charts:
             st.markdown("### 📈 Technical Analysis Charts & Pattern Interpretation")
             
-            # Display the chart first
-            enhanced_chart = create_comprehensive_charts(
+            # Create individual charts with zoom functionality
+            individual_charts = create_individual_charts(
                 df_with_indicators, fundamentals, patterns, 
                 f"{stock_symbol} - Deep Technical Analysis"
             )
-            st.plotly_chart(enhanced_chart, width='stretch')
+            
+            # Display charts in a grid layout
+            chart_names = ['price', 'volume', 'rsi', 'macd', 'moving_averages', 
+                          'bollinger', 'stochastic', 'williams', 'volatility', 'performance']
+            
+            # Create two columns for better layout
+            col1, col2 = st.columns(2)
+            
+            for i, chart_name in enumerate(chart_names):
+                if chart_name in individual_charts:
+                    if i % 2 == 0:
+                        with col1:
+                            st.plotly_chart(individual_charts[chart_name], use_container_width=True)
+                    else:
+                        with col2:
+                            st.plotly_chart(individual_charts[chart_name], use_container_width=True)
             
             # Add comprehensive chart analysis
             st.markdown("#### 📊 Detailed Chart Analysis")
