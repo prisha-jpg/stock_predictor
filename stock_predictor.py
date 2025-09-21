@@ -11,31 +11,10 @@ import re
 from typing import Dict, List, Tuple, Optional
 warnings.filterwarnings('ignore')
 import os
-
+from dotenv import load_dotenv
+load_dotenv()
 # Check and import required packages
 missing_packages = []
-
-# Helper function to get Indian Standard Time
-def get_ist_time():
-    """Get current time in Indian Standard Time (IST)"""
-    try:
-        if PYTZ_AVAILABLE:
-            ist = pytz.timezone('Asia/Kolkata')
-            return datetime.now(ist)
-        else:
-            # Fallback to UTC + 5:30 if pytz is not available
-            utc_now = datetime.utcnow()
-            ist_offset = timedelta(hours=5, minutes=30)
-            return utc_now + ist_offset
-    except:
-        # Ultimate fallback - use local time with IST notation
-        return datetime.now()
-
-def format_ist_time(dt=None):
-    """Format IST time for display"""
-    if dt is None:
-        dt = get_ist_time()
-    return dt.strftime("%B %d, %Y at %H:%M IST")
 
 # Additional imports for new features
 try:
@@ -125,6 +104,125 @@ if missing_packages:
     st.code("pip install " + " ".join(missing_packages))
     st.stop()
 
+# Helper functions - defined after all import checks
+def get_ist_time():
+    """Get current time in Indian Standard Time (IST)"""
+    try:
+        if PYTZ_AVAILABLE:
+            ist = pytz.timezone('Asia/Kolkata')
+            return datetime.now(ist)
+        else:
+            # Fallback to UTC + 5:30 if pytz is not available
+            utc_now = datetime.utcnow()
+            ist_offset = timedelta(hours=5, minutes=30)
+            return utc_now + ist_offset
+    except:
+        # Ultimate fallback - use local time with IST notation
+        return datetime.now()
+
+def format_ist_time(dt=None):
+    """Format IST time for display"""
+    if dt is None:
+        dt = get_ist_time()
+    return dt.strftime("%B %d, %Y at %H:%M IST")
+
+# Performance optimization: Simple caching decorator
+def cache_data(timeout_minutes=5):
+    """Simple caching decorator with timeout"""
+    def decorator(func):
+        cache = {}
+        def wrapper(*args, **kwargs):
+            # Create cache key from function name and arguments
+            key = f"{func.__name__}_{str(args)}_{str(kwargs)}"
+            current_time = datetime.now()
+            
+            # Check if cached data exists and is still valid
+            if key in cache:
+                cached_time, cached_result = cache[key]
+                if (current_time - cached_time).seconds < timeout_minutes * 60:
+                    return cached_result
+            
+            # Call function and cache result
+            result = func(*args, **kwargs)
+            cache[key] = (current_time, result)
+            return result
+        return wrapper
+    return decorator
+
+# Data validation utilities
+def validate_dataframe(df, required_columns=None, min_rows=20):
+    """Comprehensive dataframe validation"""
+    if df is None or df.empty:
+        return False, "DataFrame is None or empty"
+    
+    if len(df) < min_rows:
+        return False, f"Insufficient data: {len(df)} rows, need at least {min_rows}"
+    
+    if required_columns:
+        missing_cols = [col for col in required_columns if col not in df.columns]
+        if missing_cols:
+            return False, f"Missing required columns: {missing_cols}"
+    
+    # Check for excessive NaN values
+    nan_percentage = df.isnull().sum().sum() / (len(df) * len(df.columns))
+    if nan_percentage > 0.5:
+        return False, f"Too many NaN values: {nan_percentage:.1%}"
+    
+    return True, "Valid"
+
+def safe_indicator_access(df, column, default_value=0):
+    """Safely access technical indicator values with validation"""
+    try:
+        if column not in df.columns:
+            return default_value
+        
+        if df[column].empty or len(df) == 0:
+            return default_value
+            
+        value = df[column].iloc[-1]
+        
+        if pd.isna(value) or not np.isfinite(value):
+            return default_value
+            
+        return float(value)
+    except (IndexError, KeyError, ValueError, TypeError):
+        return default_value
+
+# Session state management utilities
+def init_session_state():
+    """Initialize session state variables with proper defaults"""
+    if 'last_refresh_time' not in st.session_state:
+        st.session_state['last_refresh_time'] = 0
+    
+    if 'cache_expiry' not in st.session_state:
+        st.session_state['cache_expiry'] = {}
+    
+    if 'error_count' not in st.session_state:
+        st.session_state['error_count'] = 0
+
+def is_cache_valid(cache_key, expiry_minutes=60):
+    """Check if cached data is still valid"""
+    if cache_key not in st.session_state:
+        return False
+    
+    if cache_key not in st.session_state.get('cache_expiry', {}):
+        return False
+    
+    cache_time = st.session_state['cache_expiry'][cache_key]
+    current_time = datetime.now()
+    
+    if (current_time - cache_time).seconds > expiry_minutes * 60:
+        return False
+    
+    return True
+
+def set_cache_with_expiry(cache_key, data):
+    """Set cache data with expiry timestamp"""
+    st.session_state[cache_key] = data
+    if 'cache_expiry' not in st.session_state:
+        st.session_state['cache_expiry'] = {}
+    st.session_state['cache_expiry'][cache_key] = datetime.now()
+
 class TransparentStockAnalyzer:
     def __init__(self):
         self.models = {
@@ -153,22 +251,43 @@ class TransparentStockAnalyzer:
             'sentiment_score': 0,
             'key_events': [],
             'sources': [],
-            'analysis_notes': []
+            'analysis_notes': [],
+            'earnings_today': False,
+            'earnings_impact': 'neutral'
         }
         
         try:
+            # Check earnings calendar first
+            earnings_today = self.check_earnings_calendar(stock_symbol)
+            news_data['earnings_today'] = earnings_today
+            
+            if earnings_today:
+                news_data['key_events'].append({
+                    'event': 'Earnings Release',
+                    'date': datetime.now().strftime('%Y-%m-%d'),
+                    'importance': 'HIGH',
+                    'description': f'{company_name} has earnings announcement today'
+                })
+                news_data['earnings_impact'] = 'high_volatility'
+                self.log_analysis("EARNINGS_ALERT", f"Earnings announcement detected for {stock_symbol}", 
+                                "Earnings can cause significant price volatility - exercise caution")
+            
             # Method 1: Tavily Search (Most Comprehensive)
             if TAVILY_AVAILABLE and os.getenv("TAVILY_API_KEY"):
                 self.log_analysis("NEWS_SEARCH", "Using Tavily API", "Tavily provides comprehensive web search with real-time data")
                 tavily = TavilyClient(api_key=os.getenv("TAVILY_API_KEY"))
                 
-                # Search for recent news
+                # Enhanced search queries including earnings focus
                 queries = [
                     f"{company_name} latest news earnings results financial performance 2024 2025",
                     f"{stock_symbol} NSE stock price movement analyst rating upgrade downgrade",
                     f"{company_name} quarterly results revenue profit growth expansion plans",
                     f"Indian stock market {stock_symbol} sector outlook government policy impact"
                 ]
+                
+                # Add earnings-specific query if earnings are today
+                if earnings_today:
+                    queries.append(f"{company_name} {stock_symbol} earnings announcement today results preview expectations")
                 
                 for query in queries:
                     try:
@@ -234,7 +353,7 @@ class TransparentStockAnalyzer:
             except Exception as e:
                 self.log_analysis("ALPHA_VANTAGE_ERROR", f"Alpha Vantage failed: {str(e)}", "Alpha Vantage API temporarily unavailable")
             
-            # Enhanced sentiment analysis from collected news
+                # Enhanced sentiment analysis from collected news
             if news_data['headlines']:
                 sentiment_scores = []
                 positive_keywords = [
@@ -252,6 +371,14 @@ class TransparentStockAnalyzer:
                     'supply chain issues', 'cost inflation', 'demand weakness', 'economic headwinds', 'recession risk'
                 ]
                 
+                # Earnings-specific keywords
+                earnings_keywords = {
+                    'positive': ['earnings beat', 'revenue beat', 'guidance raise', 'strong results', 'beat estimates', 
+                               'exceeds expectations', 'record earnings', 'robust performance', 'positive outlook'],
+                    'negative': ['earnings miss', 'revenue miss', 'guidance cut', 'weak results', 'misses estimates',
+                               'disappointing results', 'below expectations', 'cautious outlook', 'profit warning']
+                }
+                
                 # Market-specific keywords for Indian stocks
                 indian_market_keywords = {
                     'positive': ['gst', 'demonetization recovery', 'make in india', 'atmanirbhar', 'infrastructure push', 
@@ -267,12 +394,19 @@ class TransparentStockAnalyzer:
                     positive_score = sum(1 for word in positive_keywords if word in title_content)
                     negative_score = sum(1 for word in negative_keywords if word in title_content)
                     
+                    # Earnings-specific scoring (higher weight if earnings today)
+                    earnings_positive = sum(1 for word in earnings_keywords['positive'] if word in title_content)
+                    earnings_negative = sum(1 for word in earnings_keywords['negative'] if word in title_content)
+                    earnings_weight = 2.0 if earnings_today else 1.0
+                    
                     # Indian market specific scoring
                     indian_positive = sum(1 for word in indian_market_keywords['positive'] if word in title_content)
                     indian_negative = sum(1 for word in indian_market_keywords['negative'] if word in title_content)
                     
-                    # Weighted scoring
-                    total_score = (positive_score - negative_score) + (indian_positive - indian_negative) * 0.5
+                    # Weighted scoring with earnings boost
+                    total_score = (positive_score - negative_score) + \
+                                (earnings_positive - earnings_negative) * earnings_weight + \
+                                (indian_positive - indian_negative) * 0.5
                     
                     # Add sentiment from API if available
                     if 'sentiment' in headline:
@@ -286,15 +420,36 @@ class TransparentStockAnalyzer:
                 
                 news_data['sentiment_score'] = np.mean(sentiment_scores) if sentiment_scores else 0
                 
+                # Apply earnings volatility adjustment
+                if earnings_today:
+                    news_data['analysis_notes'].append("EARNINGS TODAY: Expect higher volatility and potential price swings")
+                    # Modify sentiment interpretation for earnings day
+                    if abs(news_data['sentiment_score']) < 1.0:
+                        news_data['analysis_notes'].append("Neutral sentiment on earnings day may indicate uncertainty - monitor for surprise moves")
+                
                 self.log_analysis("SENTIMENT_ANALYSIS", 
-                    f"Analyzed {len(news_data['headlines'])} headlines, sentiment score: {news_data['sentiment_score']:.2f}",
-                    "Sentiment calculated using keyword analysis of headlines and content")
+                    f"Analyzed {len(news_data['headlines'])} headlines, sentiment score: {news_data['sentiment_score']:.2f}, earnings today: {earnings_today}",
+                    "Sentiment calculated using keyword analysis including earnings-specific factors")
             
         except Exception as e:
             self.log_analysis("NEWS_GENERAL_ERROR", f"General news fetch error: {str(e)}", "Using fallback analysis")
             news_data['analysis_notes'].append("Real-time news temporarily unavailable, using technical analysis only")
         
         return news_data
+    
+    def check_earnings_calendar(self, symbol):
+        """Check if company has earnings today"""
+        try:
+            stock = yf.Ticker(symbol)
+            calendar = stock.calendar
+            if calendar is not None and not calendar.empty:
+                today = datetime.now().date()
+                earnings_date = calendar.index[0].date() if len(calendar) > 0 else None
+                if earnings_date == today:
+                    return True
+        except:
+            pass
+        return False
     
     def get_world_market_data(self) -> Dict:
         """Scrape world market data from investing.com"""
@@ -1324,35 +1479,49 @@ class TransparentStockAnalyzer:
             model_reasons = []
             
             if model_results:
-                best_model = max(model_results.items(), key=lambda x: x[1]['directional_accuracy'])
-                model_name = best_model[0]
-                model_accuracy = best_model[1]['directional_accuracy']
+                # Find best model from nested structure
+                best_model = None
+                best_accuracy = 0
+                best_timeframe = None
                 
-                # Make prediction with best model
-                try:
-                    feature_columns = [col for col in ['SMA_10', 'SMA_20', 'SMA_50', 'RSI', 'MACD', 'BB_position',
-                                                     'Volume_Ratio', 'Volatility', 'Momentum_Score', 'Stoch_K', 'Stoch_D', 'Williams_R'] if col in df.columns]
+                for timeframe, timeframe_data in model_results.items():
+                    if 'individual_models' in timeframe_data:
+                        for model_name, model_data in timeframe_data['individual_models'].items():
+                            accuracy = model_data.get('directional_accuracy', 0)
+                            if accuracy > best_accuracy:
+                                best_accuracy = accuracy
+                                best_model = (model_name, model_data)
+                                best_timeframe = timeframe
+                
+                if best_model:
+                    model_name = best_model[0]
+                    model_accuracy = best_model[1]['directional_accuracy']
+                
+                    # Make prediction with best model
+                    try:
+                        feature_columns = [col for col in ['SMA_10', 'SMA_20', 'SMA_50', 'RSI', 'MACD', 'BB_position',
+                                                         'Volume_Ratio', 'Volatility', 'Momentum_Score', 'Stoch_K', 'Stoch_D', 'Williams_R'] if col in df.columns]
                     
-                    if len(feature_columns) >= 3:
-                        latest_features = df[feature_columns].iloc[-1:].fillna(0)
-                        
-                        if model_name == 'Linear Regression':
-                            latest_features_scaled = self.scaler.transform(latest_features)
-                            model_pred = best_model[1]['model'].predict(latest_features_scaled)[0]
-                        else:
-                            model_pred = best_model[1]['model'].predict(latest_features)[0]
-                        
-                        if model_pred > 0.02:  # More than 2% predicted gain
-                            model_score += 0.05
-                            model_reasons.append(f"✅ {model_name} predicts {model_pred*100:.1f}% gain (accuracy: {model_accuracy:.1f}%)")
-                        elif model_pred < -0.02:  # More than 2% predicted loss
-                            model_score -= 0.05
-                            model_reasons.append(f"❌ {model_name} predicts {model_pred*100:.1f}% loss (accuracy: {model_accuracy:.1f}%)")
-                        else:
-                            model_reasons.append(f"⚪ {model_name} predicts minimal change {model_pred*100:.1f}% (accuracy: {model_accuracy:.1f}%)")
+                        if len(feature_columns) >= 3:
+                            latest_features = df[feature_columns].iloc[-1:].fillna(0)
+                            
+                            if model_name == 'Linear Regression':
+                                latest_features_scaled = self.scaler.transform(latest_features)
+                                model_pred = best_model[1]['model'].predict(latest_features_scaled)[0]
+                            else:
+                                model_pred = best_model[1]['model'].predict(latest_features)[0]
+                            
+                            if model_pred > 0.02:  # More than 2% predicted gain
+                                model_score += 0.05
+                                model_reasons.append(f"✅ {model_name} predicts {model_pred*100:.1f}% gain (accuracy: {model_accuracy:.1f}%)")
+                            elif model_pred < -0.02:  # More than 2% predicted loss
+                                model_score -= 0.05
+                                model_reasons.append(f"❌ {model_name} predicts {model_pred*100:.1f}% loss (accuracy: {model_accuracy:.1f}%)")
+                            else:
+                                model_reasons.append(f"⚪ {model_name} predicts minimal change {model_pred*100:.1f}% (accuracy: {model_accuracy:.1f}%)")
                 
-                except Exception as e:
-                    model_reasons.append(f"⚠️ Model prediction unavailable: {str(e)}")
+                    except Exception as e:
+                        model_reasons.append(f"⚠️ Model prediction unavailable: {str(e)}")
             
             # Combine all scores with weights
             total_score = (
@@ -1404,7 +1573,14 @@ class TransparentStockAnalyzer:
             if news_data and len(news_data.get('headlines', [])) >= 3:
                 base_confidence += 5
             if model_results:
-                best_accuracy = max([m['directional_accuracy'] for m in model_results.values()])
+                # Find best accuracy from nested structure
+                best_accuracy = 50  # default
+                for timeframe_data in model_results.values():
+                    if 'individual_models' in timeframe_data:
+                        for model_data in timeframe_data['individual_models'].values():
+                            accuracy = model_data.get('directional_accuracy', 50)
+                            if accuracy > best_accuracy:
+                                best_accuracy = accuracy
                 base_confidence += (best_accuracy - 50) * 0.3  # Add based on model performance
             
             # Reduce confidence for extreme predictions
@@ -2964,9 +3140,375 @@ def display_prediction_table(predictions_dict: Dict, current_price: float):
             f"{pred_30d['change_percent']:+.1f}%"
         )
 
+def get_premarket_data(symbol):
+    """Get pre-market data with gap analysis and comprehensive error handling"""
+    try:
+        # Validate input
+        if not symbol or not isinstance(symbol, str):
+            return None
+            
+        # Get regular data with rate limiting
+        stock = yf.Ticker(symbol)
+        data = stock.history(period="2d", interval="1d", prepost=True)
+        
+        # Validate data availability
+        if data is None or data.empty or len(data) < 2:
+            return None
+            
+        # Validate required columns exist
+        required_columns = ['Close', 'Volume']
+        if not all(col in data.columns for col in required_columns):
+            return None
+            
+        # Calculate gap from previous close
+        prev_close = data['Close'].iloc[-2]
+        current_price = data['Close'].iloc[-1]
+        
+        # Validate price data
+        if pd.isna(prev_close) or pd.isna(current_price) or prev_close <= 0:
+            return None
+            
+        gap_percent = ((current_price - prev_close) / prev_close) * 100
+        premarket_volume = data['Volume'].iloc[-1] if not pd.isna(data['Volume'].iloc[-1]) else 0
+        
+        return {
+            'current_price': float(current_price),
+            'previous_close': float(prev_close),
+            'gap_percent': float(gap_percent),
+            'premarket_volume': int(premarket_volume)
+        }
+        
+    except Exception as e:
+        # Log error for debugging (in production, use proper logging)
+        print(f"Error fetching premarket data for {symbol}: {str(e)}")
+        return None
+@cache_data(timeout_minutes=10)
+def get_global_market_context():
+    """Get overnight global market performance"""
+    global_context = {
+        'sgx_nifty': 0,
+        'us_futures': 0,
+        'asia_sentiment': 'neutral',
+        'usd_inr': 0
+    }
+    
+    try:
+        # SGX Nifty (Singapore)
+        sgx = yf.Ticker("^NSEI")
+        sgx_data = sgx.history(period="2d")
+        if len(sgx_data) >= 2:
+            global_context['sgx_nifty'] = ((sgx_data['Close'].iloc[-1] / sgx_data['Close'].iloc[-2]) - 1) * 100
+        
+        # USD/INR
+        usd_inr = yf.Ticker("INR=X")
+        usd_data = usd_inr.history(period="2d")
+        if len(usd_data) >= 2:
+            global_context['usd_inr'] = ((usd_data['Close'].iloc[-1] / usd_data['Close'].iloc[-2]) - 1) * 100
+            
+    except:
+        pass
+    
+    return global_context
+
+@cache_data(timeout_minutes=15)
+def get_futures_sentiment():
+    """Get Nifty and Bank Nifty futures sentiment"""
+    try:
+        # This would require a futures data API
+        # For now, use SGX Nifty as proxy
+        sgx = yf.Ticker("^NSEI")  # This is approximate
+        data = sgx.history(period="2d")
+        
+        if len(data) >= 2:
+            change = ((data['Close'].iloc[-1] / data['Close'].iloc[-2]) - 1) * 100
+            if change > 0.5:
+                return "bullish"
+            elif change < -0.5:
+                return "bearish"
+        
+        return "neutral"
+    except:
+        return "neutral"
+
+def calculate_gap_adjusted_signals(df, premarket_data):
+    """Calculate signals adjusted for overnight gaps"""
+    buy_signal = 0
+    sell_signal = 0
+    confidence = 0
+    
+    # Get gap information
+    gap_percent = premarket_data['gap_percent'] if premarket_data else 0
+    
+    # RSI Analysis (gap-adjusted)
+    if 'RSI' in df.columns and not df['RSI'].empty and not pd.isna(df['RSI'].iloc[-1]):
+        rsi = df['RSI'].iloc[-1]
+        if gap_percent > 2:  # Gap up
+            if rsi < 50:  # RSI not overbought despite gap
+                buy_signal += 3
+                confidence += 25
+            elif rsi > 70:  # Overbought after gap up - risky
+                sell_signal += 1
+                confidence += 10
+        elif gap_percent < -2:  # Gap down
+            if rsi > 50:  # RSI not oversold despite gap
+                buy_signal += 2  # Potential bounce opportunity
+                confidence += 20
+            elif rsi < 30:  # Oversold after gap down - extreme value
+                buy_signal += 3
+                confidence += 30
+        else:  # Normal RSI analysis for no significant gap
+            if rsi < 30:
+                buy_signal += 2
+                confidence += 20
+            elif rsi > 70:
+                sell_signal += 2
+                confidence += 20
+            elif 40 <= rsi <= 60:
+                buy_signal += 1
+                confidence += 10
+    
+    # MACD Analysis (gap-adjusted)
+    if 'MACD' in df.columns and 'MACD_signal' in df.columns and not df['MACD'].empty and not df['MACD_signal'].empty and not pd.isna(df['MACD'].iloc[-1]) and not pd.isna(df['MACD_signal'].iloc[-1]):
+        macd = df['MACD'].iloc[-1]
+        macd_signal = df['MACD_signal'].iloc[-1]
+        
+        if gap_percent > 2:  # Gap up
+            if macd > macd_signal and macd > 0:  # Strong momentum continuation
+                buy_signal += 2
+                confidence += 20
+        elif gap_percent < -2:  # Gap down
+            if macd < macd_signal and macd < 0:  # Bearish momentum
+                sell_signal += 2
+                confidence += 20
+            elif macd > macd_signal:  # Potential reversal signal
+                buy_signal += 2
+                confidence += 15
+        else:  # Normal MACD analysis
+            if macd > macd_signal:
+                buy_signal += 2
+                confidence += 15
+            else:
+                sell_signal += 1
+                confidence += 10
+    
+    # Moving Average Analysis (gap-adjusted)
+    current_price = premarket_data['current_price'] if premarket_data else df['Close'].iloc[-1]
+    if 'SMA_20' in df.columns and 'SMA_50' in df.columns and not df['SMA_20'].empty and not df['SMA_50'].empty and not pd.isna(df['SMA_20'].iloc[-1]) and not pd.isna(df['SMA_50'].iloc[-1]):
+        sma_20 = df['SMA_20'].iloc[-1]
+        sma_50 = df['SMA_50'].iloc[-1]
+        
+        if gap_percent > 2:  # Gap up
+            if current_price > sma_20 * 1.02:  # Strong breakout above MA
+                buy_signal += 2
+                confidence += 20
+        elif gap_percent < -2:  # Gap down
+            if current_price < sma_20 * 0.98:  # Break below MA
+                sell_signal += 2
+                confidence += 20
+            elif current_price > sma_50:  # Still above longer MA - potential support
+                buy_signal += 1
+                confidence += 15
+        else:  # Normal MA analysis
+            if current_price > sma_20 > sma_50:
+                buy_signal += 2
+                confidence += 15
+            elif current_price < sma_20 < sma_50:
+                sell_signal += 2
+                confidence += 15
+    
+    # Gap-specific signals
+    if abs(gap_percent) > 1:  # Significant gap
+        if gap_percent > 3:  # Large gap up > 3%
+            # Check for continuation vs exhaustion
+            buy_signal += 2
+            confidence += 15
+        elif gap_percent < -3:  # Large gap down > 3%
+            # Potential oversold bounce
+            buy_signal += 1
+            confidence += 15
+        elif 1 < gap_percent <= 3:  # Moderate gap up
+            buy_signal += 1
+            confidence += 10
+        elif -3 <= gap_percent < -1:  # Moderate gap down
+            sell_signal += 1
+            confidence += 10
+    
+    return buy_signal, sell_signal, confidence
+
+@cache_data(timeout_minutes=5)
+def check_market_events():
+    """Check for major market events that could affect recommendations"""
+    events = []
+    
+    try:
+        # Check for major index movements
+        nifty = yf.Ticker("^NSEI")
+        nifty_data = nifty.history(period="2d")
+        if len(nifty_data) >= 2:
+            nifty_change = ((nifty_data['Close'].iloc[-1] / nifty_data['Close'].iloc[-2]) - 1) * 100
+            if abs(nifty_change) > 1.5:
+                severity = "HIGH" if abs(nifty_change) > 3 else "MEDIUM"
+                events.append({
+                    'type': 'INDEX_MOVEMENT',
+                    'severity': severity,
+                    'message': f"Nifty moved {nifty_change:+.1f}% - {severity.lower()} volatility expected",
+                    'impact': 'ALL_STOCKS'
+                })
+        
+        # Check Bank Nifty for banking sector impact
+        bank_nifty = yf.Ticker("^NSEBANK")
+        bank_data = bank_nifty.history(period="2d")
+        if len(bank_data) >= 2:
+            bank_change = ((bank_data['Close'].iloc[-1] / bank_data['Close'].iloc[-2]) - 1) * 100
+            if abs(bank_change) > 2:
+                events.append({
+                    'type': 'SECTOR_MOVEMENT',
+                    'severity': 'MEDIUM' if abs(bank_change) > 3 else 'LOW',
+                    'message': f"Bank Nifty moved {bank_change:+.1f}% - Banking stocks affected",
+                    'impact': 'BANKING_SECTOR'
+                })
+        
+        # Check USD/INR for export-import companies
+        usd_inr = yf.Ticker("INR=X")
+        usd_data = usd_inr.history(period="2d")
+        if len(usd_data) >= 2:
+            usd_change = ((usd_data['Close'].iloc[-1] / usd_data['Close'].iloc[-2]) - 1) * 100
+            if abs(usd_change) > 0.5:
+                events.append({
+                    'type': 'CURRENCY_MOVEMENT',
+                    'severity': 'MEDIUM' if abs(usd_change) > 1 else 'LOW',
+                    'message': f"USD/INR moved {usd_change:+.1f}% - IT/Export stocks impacted",
+                    'impact': 'IT_EXPORT_STOCKS'
+                })
+        
+        # Check crude oil for energy and auto stocks
+        crude_oil = yf.Ticker("CL=F")
+        crude_data = crude_oil.history(period="2d")
+        if len(crude_data) >= 2:
+            crude_change = ((crude_data['Close'].iloc[-1] / crude_data['Close'].iloc[-2]) - 1) * 100
+            if abs(crude_change) > 2:
+                events.append({
+                    'type': 'COMMODITY_MOVEMENT',
+                    'severity': 'MEDIUM' if abs(crude_change) > 4 else 'LOW',
+                    'message': f"Crude oil moved {crude_change:+.1f}% - Energy/Auto stocks affected",
+                    'impact': 'ENERGY_AUTO_STOCKS'
+                })
+        
+        # Check Gold for precious metals impact
+        gold = yf.Ticker("GC=F")
+        gold_data = gold.history(period="2d")
+        if len(gold_data) >= 2:
+            gold_change = ((gold_data['Close'].iloc[-1] / gold_data['Close'].iloc[-2]) - 1) * 100
+            if abs(gold_change) > 1.5:
+                events.append({
+                    'type': 'PRECIOUS_METALS',
+                    'severity': 'LOW',
+                    'message': f"Gold moved {gold_change:+.1f}% - Safe haven sentiment shift",
+                    'impact': 'METALS_JEWELRY_STOCKS'
+                })
+        
+        # Check VIX for volatility assessment
+        vix = yf.Ticker("^VIX")
+        vix_data = vix.history(period="2d")
+        if len(vix_data) >= 2:
+            vix_current = vix_data['Close'].iloc[-1]
+            if vix_current > 25:
+                events.append({
+                    'type': 'VOLATILITY_SPIKE',
+                    'severity': 'HIGH' if vix_current > 35 else 'MEDIUM',
+                    'message': f"VIX at {vix_current:.1f} - High market fear, increased volatility",
+                    'impact': 'ALL_STOCKS'
+                })
+            elif vix_current < 15:
+                events.append({
+                    'type': 'LOW_VOLATILITY',
+                    'severity': 'LOW',
+                    'message': f"VIX at {vix_current:.1f} - Low volatility, calm markets",
+                    'impact': 'ALL_STOCKS'
+                })
+        
+        # Check for earnings season impact
+        current_time = get_ist_time()
+        current_month = current_time.month
+        if current_month in [1, 4, 7, 10]:  # Earnings quarters
+            events.append({
+                'type': 'EARNINGS_SEASON',
+                'severity': 'MEDIUM',
+                'message': "Earnings season active - Increased stock volatility expected",
+                'impact': 'ALL_STOCKS'
+            })
+        
+        # Check bond yields (10-year treasury)
+        bond_yield = yf.Ticker("^TNX")
+        bond_data = bond_yield.history(period="5d")
+        if len(bond_data) >= 2:
+            yield_current = bond_data['Close'].iloc[-1]
+            yield_prev = bond_data['Close'].iloc[-2]
+            yield_change = yield_current - yield_prev
+            if abs(yield_change) > 0.1:
+                events.append({
+                    'type': 'BOND_YIELD_MOVEMENT',
+                    'severity': 'MEDIUM' if abs(yield_change) > 0.2 else 'LOW',
+                    'message': f"10Y Treasury yield {yield_change:+.2f}% - Interest rate sensitive stocks affected",
+                    'impact': 'FINANCIAL_REAL_ESTATE'
+                })
+        
+    except Exception as e:
+        events.append({
+            'type': 'ERROR',
+            'severity': 'LOW',
+            'message': f"Event monitoring error: {str(e)}",
+            'impact': 'NONE'
+        })
+    
+    return events
+
+def get_time_sensitive_warnings(current_time):
+    """Get warnings based on current time"""
+    warnings = []
+    current_minutes = current_time.hour * 60 + current_time.minute
+    
+    if 420 <= current_minutes <= 480:  # 7 AM - 8 AM
+        warnings.append("⚠️ Early pre-market: Recommendations may change significantly before market open")
+    elif 480 <= current_minutes <= 535:  # 8 AM - 8:55 AM
+        warnings.append("📊 Optimal analysis window: Good time to finalize your strategy")
+    elif 535 <= current_minutes <= 555:  # 8:55 AM - 9:15 AM
+        warnings.append("🚨 Final countdown: Last chance to review before market opens")
+    
+    return warnings
+
+def calculate_risk_adjusted_position(rec, premarket_data):
+    """Calculate position size based on gap risk"""
+    base_position = 100  # Base position size
+    
+    gap_percent = abs(premarket_data['gap_percent']) if premarket_data else 0
+    
+    # Reduce position size for high gaps
+    if gap_percent > 5:
+        position_multiplier = 0.5  # Half position
+        risk_level = "HIGH"
+    elif gap_percent > 2:
+        position_multiplier = 0.75  # 75% position
+        risk_level = "MEDIUM"
+    else:
+        position_multiplier = 1.0  # Full position
+        risk_level = "LOW"
+    
+    adjusted_position = int(base_position * position_multiplier)
+    
+    return {
+        'position_size': adjusted_position,
+        'risk_level': risk_level,
+        'gap_risk': gap_percent
+    }
+
 def generate_daily_recommendations(popular_stocks):
     """Generate daily stock recommendations with caching"""
     recommendations = []
+    
+    # Get global market context and futures sentiment for overall market bias
+    global_context = get_global_market_context()
+    futures_sentiment = get_futures_sentiment()
     
     # Create progress bar
     progress_bar = st.progress(0)
@@ -2976,8 +3518,9 @@ def generate_daily_recommendations(popular_stocks):
         try:
             status_text.text(f"Analyzing {symbol}...")
             
-            # Get stock data
+            # Get stock data with pre-market information
             data = yf.download(symbol, period="3mo", interval="1d")
+            premarket_data = get_premarket_data(symbol)
             if data.empty:
                 continue
                 
@@ -2985,82 +3528,99 @@ def generate_daily_recommendations(popular_stocks):
             analyzer = TransparentStockAnalyzer()
             df_with_indicators = analyzer.calculate_advanced_indicators(data)
             
-            # Get current price
-            current_price = data['Close'].iloc[-1]
+            # Get current price (use premarket data if available for freshness)
+            if premarket_data:
+                current_price = premarket_data['current_price']
+                gap_percent = premarket_data['gap_percent']
+                premarket_volume = premarket_data['premarket_volume']
+            else:
+                current_price = data['Close'].iloc[-1]
+                gap_percent = 0
+                premarket_volume = 0
             
-            # Calculate buy/sell signals
-            buy_signal = 0
-            sell_signal = 0
-            confidence = 0
+            # Enhanced signal calculation with gap adjustment
+            buy_signal, sell_signal, confidence = calculate_gap_adjusted_signals(df_with_indicators, premarket_data)
             
-            # RSI Analysis
-            if 'RSI' in df_with_indicators.columns:
-                rsi = df_with_indicators['RSI'].iloc[-1]
-                if rsi < 30:
-                    buy_signal += 2
-                    confidence += 20
-                elif rsi > 70:
-                    sell_signal += 2
-                    confidence += 20
-                elif 40 <= rsi <= 60:
-                    buy_signal += 1
-                    confidence += 10
+            # Initialize volume analysis tracking
+            volume_reasons = []
             
-            # MACD Analysis
-            if 'MACD' in df_with_indicators.columns and 'MACD_signal' in df_with_indicators.columns:
-                macd = df_with_indicators['MACD'].iloc[-1]
-                macd_signal = df_with_indicators['MACD_signal'].iloc[-1]
-                if macd > macd_signal:
-                    buy_signal += 2
-                    confidence += 15
-                else:
-                    sell_signal += 1
-                    confidence += 10
+            # Additional technical indicators for comprehensive analysis
             
-            # Moving Average Analysis
-            if 'SMA_20' in df_with_indicators.columns and 'SMA_50' in df_with_indicators.columns:
-                sma_20 = df_with_indicators['SMA_20'].iloc[-1]
-                sma_50 = df_with_indicators['SMA_50'].iloc[-1]
-                if current_price > sma_20 > sma_50:
-                    buy_signal += 2
-                    confidence += 15
-                elif current_price < sma_20 < sma_50:
-                    sell_signal += 2
-                    confidence += 15
-            
-            # Stochastic Analysis
+            # Stochastic Analysis (gap-aware)
             if 'Stoch_K' in df_with_indicators.columns and 'Stoch_D' in df_with_indicators.columns:
                 stoch_k = df_with_indicators['Stoch_K'].iloc[-1]
                 stoch_d = df_with_indicators['Stoch_D'].iloc[-1]
-                if stoch_k < 20 and stoch_d < 20:
-                    buy_signal += 2
-                    confidence += 15
-                elif stoch_k > 80 and stoch_d > 80:
-                    sell_signal += 2
-                    confidence += 15
-                elif stoch_k > stoch_d:
-                    buy_signal += 1
-                    confidence += 10
+                
+                # Adjust stochastic signals based on gaps
+                if gap_percent > 2:  # Gap up
+                    if stoch_k < 70 and stoch_d < 70:  # Not yet overbought
+                        buy_signal += 1
+                        confidence += 10
+                elif gap_percent < -2:  # Gap down
+                    if stoch_k < 30 and stoch_d < 30:  # Oversold - bounce opportunity
+                        buy_signal += 2
+                        confidence += 15
+                else:  # Normal stochastic analysis
+                    if stoch_k < 20 and stoch_d < 20:
+                        buy_signal += 2
+                        confidence += 15
+                    elif stoch_k > 80 and stoch_d > 80:
+                        sell_signal += 2
+                        confidence += 15
+                    elif stoch_k > stoch_d:
+                        buy_signal += 1
+                        confidence += 10
             
-            # Williams %R Analysis
+            # Williams %R Analysis (gap-aware)
             if 'Williams_R' in df_with_indicators.columns:
                 williams_r = df_with_indicators['Williams_R'].iloc[-1]
-                if williams_r < -80:
-                    buy_signal += 2
-                    confidence += 15
-                elif williams_r > -20:
-                    sell_signal += 2
-                    confidence += 15
+                
+                if gap_percent > 2:  # Gap up
+                    if williams_r < -50:  # Not overbought despite gap
+                        buy_signal += 1
+                        confidence += 10
+                elif gap_percent < -2:  # Gap down
+                    if williams_r < -80:  # Oversold after gap down
+                        buy_signal += 2
+                        confidence += 15
+                else:  # Normal Williams %R analysis
+                    if williams_r < -80:
+                        buy_signal += 2
+                        confidence += 15
+                    elif williams_r > -20:
+                        sell_signal += 2
+                        confidence += 15
             
-            # Volume Analysis
+            # Enhanced volume analysis
             if 'Volume_Ratio' in df_with_indicators.columns:
                 vol_ratio = df_with_indicators['Volume_Ratio'].iloc[-1]
-                if vol_ratio > 1.5:
+                premarket_vol = premarket_data['premarket_volume'] if premarket_data else 0
+                avg_volume = df_with_indicators['Volume'].tail(20).mean()
+                
+                # Compare pre-market volume to average
+                if premarket_vol > avg_volume * 0.1:  # 10% of average volume in pre-market
+                    buy_signal += 2
+                    confidence += 15
+                    volume_reasons.append("High pre-market volume indicates strong interest")
+                elif vol_ratio > 1.5:
                     buy_signal += 1
                     confidence += 10
-                elif vol_ratio < 0.7:
-                    sell_signal += 1
-                    confidence += 5
+            
+            # Apply global market context and futures sentiment bias
+            if futures_sentiment == "bullish":
+                buy_signal += 1
+                confidence += 5
+            elif futures_sentiment == "bearish":
+                sell_signal += 1
+                confidence += 5
+            
+            # Apply global market context (SGX Nifty sentiment)
+            if global_context.get('sgx_nifty', 0) > 1:
+                buy_signal += 1
+                confidence += 5
+            elif global_context.get('sgx_nifty', 0) < -1:
+                sell_signal += 1
+                confidence += 5
             
             # Calculate recommendation
             net_signal = buy_signal - sell_signal
@@ -3088,7 +3648,10 @@ def generate_daily_recommendations(popular_stocks):
                     'stop_loss': stop_loss,
                     'confidence': confidence,
                     'expected_return': expected_return,
-                    'net_signal': net_signal
+                    'net_signal': net_signal,
+                    'gap_percent': gap_percent,
+                    'premarket_volume': premarket_volume,
+                    'data_freshness': 'live' if premarket_data else 'previous_close'
                 })
             
             # Update progress
@@ -3103,6 +3666,31 @@ def generate_daily_recommendations(popular_stocks):
     status_text.empty()
     
     return recommendations
+
+def should_refresh_recommendations():
+    """Determine if recommendations should refresh"""
+    current_time = get_ist_time()
+    current_minutes = current_time.hour * 60 + current_time.minute
+    
+    # Refresh every 30 minutes during pre-market (7 AM - 9:15 AM)
+    if 420 <= current_minutes <= 555:  # 7 AM to 9:15 AM
+        last_refresh = st.session_state.get('last_refresh_time', 0)
+        if current_minutes - last_refresh >= 30:
+            return True
+    
+    # Refresh every 15 minutes during market hours (9:15 AM - 3:30 PM)
+    elif 555 <= current_minutes <= 930:  # 9:15 AM to 3:30 PM
+        last_refresh = st.session_state.get('last_refresh_time', 0)
+        if current_minutes - last_refresh >= 15:
+            return True
+    
+    # Refresh every hour after market hours (3:30 PM - 11 PM)
+    elif 930 <= current_minutes <= 1380:  # 3:30 PM to 11 PM
+        last_refresh = st.session_state.get('last_refresh_time', 0)
+        if current_minutes - last_refresh >= 60:
+            return True
+    
+    return False
 
 def get_daily_stock_recommendations():
     """Get daily stock recommendations with buy/sell prices and profit predictions"""
@@ -3151,6 +3739,12 @@ def get_daily_stock_recommendations():
     
     # Show timezone confirmation
     st.markdown(f"🕐 **Current IST Time**: {current_time.strftime('%H:%M:%S')} | **Market Status**: {market_status}")
+    
+    # Add time-sensitive warnings
+    time_warnings = get_time_sensitive_warnings(current_time)
+    if time_warnings:
+        for warning in time_warnings:
+            st.warning(warning)
     
     # Show pre-market analysis message
     if current_time_minutes < market_open_time and not is_weekend:
@@ -3220,19 +3814,73 @@ def get_daily_stock_recommendations():
     
     st.markdown("---")
     
+    # Check and display market events
+    market_events = check_market_events()
+    if market_events:
+        st.markdown("### 🚨 Market Events & Alerts")
+        
+        # Streamlined event display with better performance
+        event_counts = {'HIGH': 0, 'MEDIUM': 0, 'LOW': 0}
+        
+        # Count and display high/medium events immediately
+        for event in market_events:
+            event_counts[event['severity']] += 1
+            
+            if event['severity'] == 'HIGH':
+                st.error(f"🔴 **{event['type']}**: {event['message']}")
+            elif event['severity'] == 'MEDIUM':
+                st.warning(f"🟡 **{event['type']}**: {event['message']}")
+        
+        # Display low severity events in a collapsed expander only if they exist
+        if event_counts['LOW'] > 0:
+            with st.expander(f"📊 Additional Market Information ({event_counts['LOW']} items)", expanded=False):
+                for event in market_events:
+                    if event['severity'] == 'LOW':
+                        st.info(f"🔵 **{event['type']}**: {event['message']}")
+        
+        st.markdown("---")
+    
     # Cache recommendations for the day to avoid recomputation
     cache_key = f"recommendations_{current_time.strftime('%Y-%m-%d')}"
     
-    # Use session state to cache recommendations
-    if cache_key not in st.session_state or refresh_recommendations:
+    # Dynamic refresh logic based on market timing
+    if cache_key not in st.session_state or refresh_recommendations or should_refresh_recommendations():
         with st.spinner("🔍 Analyzing stocks for today's recommendations..."):
             st.session_state[cache_key] = generate_daily_recommendations(popular_stocks)
+            # Update last refresh time
+            st.session_state['last_refresh_time'] = current_time.hour * 60 + current_time.minute
     
     recommendations = st.session_state[cache_key]
     
     # Display recommendations
     if recommendations:
         st.success(f"Found {len(recommendations)} strong recommendations for today!")
+        
+        # Show refresh status and timing
+        last_refresh = st.session_state.get('last_refresh_time', 0)
+        current_minutes = current_time.hour * 60 + current_time.minute
+        
+        # Calculate next refresh time
+        if 420 <= current_minutes <= 555:  # Pre-market
+            next_refresh_minutes = ((current_minutes // 30) + 1) * 30
+            refresh_interval = "30 minutes (Pre-market)"
+        elif 555 <= current_minutes <= 930:  # Market hours
+            next_refresh_minutes = ((current_minutes // 15) + 1) * 15
+            refresh_interval = "15 minutes (Market hours)"
+        elif 930 <= current_minutes <= 1380:  # After hours
+            next_refresh_minutes = ((current_minutes // 60) + 1) * 60
+            refresh_interval = "1 hour (After hours)"
+        else:
+            next_refresh_minutes = 420  # Next 7 AM
+            refresh_interval = "Next pre-market (7 AM)"
+        
+        # Convert minutes back to time
+        next_refresh_hour = next_refresh_minutes // 60
+        next_refresh_min = next_refresh_minutes % 60
+        next_refresh_time = f"{next_refresh_hour:02d}:{next_refresh_min:02d}"
+        
+        # Display refresh info
+        st.info(f"🔄 **Auto-refresh**: Every {refresh_interval} | **Next refresh**: {next_refresh_time} IST")
         
         # Create columns for better layout
         col1, col2, col3 = st.columns(3)
@@ -3250,8 +3898,12 @@ def get_daily_stock_recommendations():
         
         # Display each recommendation
         for i, rec in enumerate(recommendations[:10]):  # Show top 10
-            with st.expander(f"📊 {rec['symbol']} - {rec['recommendation']} | Confidence: {rec['confidence']:.1f}%"):
-                col1, col2, col3 = st.columns(3)
+            # Add data freshness indicator
+            freshness_indicator = "🔴 Live" if rec.get('data_freshness') == 'live' else "🟡 Previous Close"
+            gap_display = f" | Gap: {rec.get('gap_percent', 0):+.1f}%" if abs(rec.get('gap_percent', 0)) > 0.5 else ""
+            
+            with st.expander(f"📊 {rec['symbol']} - {rec['recommendation']} | Confidence: {rec['confidence']:.1f}% | {freshness_indicator}{gap_display}"):
+                col1, col2, col3, col4 = st.columns(4)
                 
                 with col1:
                     st.write(f"**Current Price:** ₹{rec['current_price']:.2f}")
@@ -3276,6 +3928,27 @@ def get_daily_stock_recommendations():
                     else:
                         potential_profit = rec['current_price'] - rec['target_price']
                         st.write(f"**Potential Profit:** ₹{potential_profit:.2f}")
+                
+                with col4:
+                    # Calculate risk-adjusted position sizing
+                    premarket_data = {'gap_percent': rec.get('gap_percent', 0)}
+                    position_info = calculate_risk_adjusted_position(rec, premarket_data)
+                    
+                    # Display position sizing information
+                    risk_color = {"HIGH": "🔴", "MEDIUM": "🟡", "LOW": "🟢"}[position_info['risk_level']]
+                    st.write(f"**Position Size:** {position_info['position_size']} shares")
+                    st.write(f"**Risk Level:** {risk_color} {position_info['risk_level']}")
+                    
+                    # Add gap and freshness information
+                    st.write(f"**Data Freshness:** {rec.get('data_freshness', 'N/A').title()}")
+                    if abs(rec.get('gap_percent', 0)) > 0.1:
+                        gap_color = "🟢" if rec.get('gap_percent', 0) > 0 else "🔴"
+                        st.write(f"**Gap:** {gap_color} {rec.get('gap_percent', 0):+.1f}%")
+                    
+                    if rec.get('premarket_volume', 0) > 0:
+                        st.write(f"**Pre-Market Vol:** {rec.get('premarket_volume', 0):,.0f}")
+                    else:
+                        st.write("**Pre-Market Vol:** N/A")
     
     else:
         st.warning("No strong recommendations found for today. Market conditions may be neutral.")
@@ -3350,6 +4023,9 @@ def main():
         layout="wide",
         page_icon="📈"
     )
+    
+    # Initialize session state
+    init_session_state()
     
     # Navigation sidebar
     st.sidebar.title("📈 AI Stock Predictor")
@@ -3852,12 +4528,16 @@ def main():
             with st.spinner("Analyzing chart patterns with AI..."):
                 llm_chart_analysis = analyzer.analyze_chart_patterns_with_llm(data, patterns)
             
-            st.markdown(f"""
-            <div style='padding: 1rem; background-color: #f8f9fa; border-left: 4px solid #007bff; border-radius: 5px;'>
-                <h5 style='color: #007bff; margin-top: 0;'>What the Charts Are Telling Us:</h5>
-                <p style='margin-bottom: 0;'>{llm_chart_analysis}</p>
-            </div>
-            """, unsafe_allow_html=True)
+    #         st.markdown(f"""
+    # <div style='padding: 1rem; background-color: #ffffff; border-left: 4px solid #007bff; border-radius: 5px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);'>
+    #     <h5 style='color: #007bff; margin-top: 0;'>What the Charts Are Telling Us:</h5>
+    #     <p style='margin-bottom: 0; color: #2c3e50 !important; font-size: 14px; line-height: 1.6;'>{llm_chart_analysis}</p>
+    # </div>
+    # """, unsafe_allow_html=True)
+            with st.container():
+                st.info(f"**What the Charts Are Telling Us:**\n\n{llm_chart_analysis}")
+
+
         
         # === NEWS AND MARKET INTELLIGENCE ===
         if show_news and news_data and 'headlines' in news_data and news_data['headlines']:
@@ -3964,16 +4644,59 @@ def main():
         # === MODEL PERFORMANCE (DEEP ANALYSIS ONLY) ===
         if analysis_depth == "Deep Analysis" and model_results:
             with st.expander("🤖 AI Model Performance", expanded=False):
-                model_df = pd.DataFrame({
-                    'Model': list(model_results.keys()),
-                    'Accuracy (%)': [results['directional_accuracy'] for results in model_results.values()],
-                    'Error': [f"{results['mae']:.3f}" for results in model_results.values()]
-                })
+                # Extract model performance data from nested structure
+                model_performance_data = []
+                for timeframe, timeframe_data in model_results.items():
+                    if 'individual_models' in timeframe_data:
+                        best_model_name = timeframe_data.get('best_model', 'Unknown')
+                        if best_model_name in timeframe_data['individual_models']:
+                            best_model_results = timeframe_data['individual_models'][best_model_name]
+                            model_performance_data.append({
+                                'Timeframe': timeframe,
+                                'Best Model': best_model_name,
+                                'Accuracy (%)': f"{best_model_results.get('directional_accuracy', 0):.1f}%",
+                                'R² Score': f"{best_model_results.get('r2', 0):.3f}",
+                                'RMSE': f"{best_model_results.get('rmse', 0):.4f}"
+                            })
                 
-                st.dataframe(model_df, width='stretch')
+                if model_performance_data:
+                    model_df = pd.DataFrame(model_performance_data)
+                    st.dataframe(model_df, width='stretch')
+                    
+                    # Show detailed model comparison for first timeframe
+                    first_timeframe = list(model_results.keys())[0]
+                    if 'individual_models' in model_results[first_timeframe]:
+                        st.markdown(f"**Detailed Model Comparison for {first_timeframe}:**")
+                        detailed_models = []
+                        for model_name, model_data in model_results[first_timeframe]['individual_models'].items():
+                            detailed_models.append({
+                                'Model': model_name,
+                                'Accuracy (%)': f"{model_data.get('directional_accuracy', 0):.1f}%",
+                                'R² Score': f"{model_data.get('r2', 0):.3f}",
+                                'MAE': f"{model_data.get('mae', 0):.4f}",
+                                'Weight': f"{model_results[first_timeframe]['ensemble_weights'].get(model_name, 0):.2f}"
+                            })
+                        
+                        detailed_df = pd.DataFrame(detailed_models)
+                        st.dataframe(detailed_df, width='stretch')
+                else:
+                    st.warning("No model performance data available")
                 
-                best_model = max(model_results.items(), key=lambda x: x[1]['directional_accuracy'])
-                st.write(f"**Best Model**: {best_model[0]} ({best_model[1]['directional_accuracy']:.1f}% accuracy)")
+                # Find best overall model
+                best_model = None
+                best_accuracy = 0
+                for timeframe_data in model_results.values():
+                    if 'individual_models' in timeframe_data:
+                        for model_name, model_data in timeframe_data['individual_models'].items():
+                            accuracy = model_data.get('directional_accuracy', 0)
+                            if accuracy > best_accuracy:
+                                best_accuracy = accuracy
+                                best_model = (model_name, model_data)
+                
+                if best_model:
+                    st.write(f"**Best Model**: {best_model[0]} ({best_model[1]['directional_accuracy']:.1f}% accuracy)")
+                else:
+                    st.write("**Best Model**: No model data available")
     
     # === FOOTER ===
     st.markdown("---")
