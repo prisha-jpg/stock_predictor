@@ -3424,7 +3424,7 @@ def main():
             st.markdown(f"""
             <div style='padding: 1rem; background-color: #f8f9fa; border-left: 4px solid #007bff; border-radius: 5px;'>
                 <h5 style='color: #007bff; margin-top: 0;'>What the Charts Are Telling Us:</h5>
-                <p style='margin-bottom: 0;'>{llm_chart_analysis}</p>
+                <p style='margin-bottom: 0; color: #000000;'>{llm_chart_analysis}</p>
             </div>
             """, unsafe_allow_html=True)
         
