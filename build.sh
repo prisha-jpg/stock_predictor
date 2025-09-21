@@ -3,11 +3,12 @@
 # Exit on error
 set -o errexit
 
-# Install Python dependencies
-pip install --upgrade pip
-pip install -r requirements.txt
+echo "Starting build process..."
 
-# Install system dependencies for pytesseract if needed
-# (These are usually handled by Render's default Python environment)
+# Upgrade pip first
+python -m pip install --upgrade pip
+
+# Install dependencies
+pip install -r requirements.txt
 
 echo "Build completed successfully!"
