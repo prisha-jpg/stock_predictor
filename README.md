@@ -11,6 +11,11 @@ A comprehensive stock analysis and prediction application built with Streamlit, 
 - **Interactive Visualizations**: Dynamic charts with Plotly
 - **Multi-timeframe Analysis**: 1-day to 30-day predictions
 
+## Requirements
+
+- **Python**: 3.10.x (specified in `runtime.txt`)
+- **Dependencies**: See `requirements.txt` for a complete list
+
 ## Local Development
 
 1. Clone the repository:
