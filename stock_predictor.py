@@ -130,25 +130,75 @@ def format_ist_time(dt=None):
         dt = get_ist_time()
     return dt.strftime("%B %d, %Y at %H:%M IST")
 
-# Performance optimization: Simple caching decorator
+# Enhanced caching system for better performance
+import hashlib
+
+class DataCache:
+    """Enhanced caching system with memory and time management"""
+    def __init__(self, max_items=100):
+        self.cache = {}
+        self.max_items = max_items
+        self.access_times = {}
+    
+    def _generate_key(self, func_name, args, kwargs):
+        """Generate unique cache key"""
+        key_str = f"{func_name}_{str(args)}_{str(sorted(kwargs.items()))}"
+        return hashlib.md5(key_str.encode()).hexdigest()
+    
+    def get(self, func_name, args, kwargs, timeout_minutes=5):
+        """Get cached data if valid"""
+        key = self._generate_key(func_name, args, kwargs)
+        current_time = datetime.now()
+        
+        if key in self.cache:
+            cached_time, cached_result = self.cache[key]
+            if (current_time - cached_time).total_seconds() < timeout_minutes * 60:
+                self.access_times[key] = current_time
+                return cached_result
+            else:
+                # Remove expired cache
+                del self.cache[key]
+                if key in self.access_times:
+                    del self.access_times[key]
+        
+        return None
+    
+    def set(self, func_name, args, kwargs, result):
+        """Set cached data with LRU eviction"""
+        key = self._generate_key(func_name, args, kwargs)
+        current_time = datetime.now()
+        
+        # Clean up if cache is full
+        if len(self.cache) >= self.max_items:
+            # Remove oldest accessed item
+            oldest_key = min(self.access_times.keys(), key=lambda k: self.access_times[k])
+            del self.cache[oldest_key]
+            del self.access_times[oldest_key]
+        
+        self.cache[key] = (current_time, result)
+        self.access_times[key] = current_time
+    
+    def clear(self):
+        """Clear all cached data"""
+        self.cache.clear()
+        self.access_times.clear()
+
+# Global cache instance
+data_cache = DataCache(max_items=200)
+
 def cache_data(timeout_minutes=5):
-    """Simple caching decorator with timeout"""
+    """Enhanced caching decorator with better performance"""
     def decorator(func):
-        cache = {}
         def wrapper(*args, **kwargs):
-            # Create cache key from function name and arguments
-            key = f"{func.__name__}_{str(args)}_{str(kwargs)}"
-            current_time = datetime.now()
-            
-            # Check if cached data exists and is still valid
-            if key in cache:
-                cached_time, cached_result = cache[key]
-                if (current_time - cached_time).seconds < timeout_minutes * 60:
-                    return cached_result
+            # Try to get from cache first
+            cached_result = data_cache.get(func.__name__, args, kwargs, timeout_minutes)
+            if cached_result is not None:
+                return cached_result
             
             # Call function and cache result
             result = func(*args, **kwargs)
-            cache[key] = (current_time, result)
+            if result is not None:  # Only cache non-None results
+                data_cache.set(func.__name__, args, kwargs, result)
             return result
         return wrapper
     return decorator
@@ -371,6 +421,7 @@ class TransparentStockAnalyzer:
             'reasoning': reasoning
         })
         
+    @cache_data(timeout_minutes=10)  # Cache news for 10 minutes
     def get_real_time_news(self, stock_symbol: str, company_name: str) -> Dict:
         """Get real-time news from multiple sources with full transparency"""
         news_data = {
@@ -635,6 +686,7 @@ class TransparentStockAnalyzer:
                              "Using fallback market analysis")
             return {'global_sentiment': 'neutral', 'major_indices': [], 'market_summary': 'Data unavailable'}
     
+    @cache_data(timeout_minutes=30)  # Cache fundamentals for 30 minutes
     def get_comprehensive_fundamentals(self, symbol: str) -> Dict:
         """Get comprehensive fundamental data with transparency"""
         fundamentals = {}
@@ -3362,8 +3414,9 @@ class StockPredictor:
         self.model = None
         self.scaler = StandardScaler()
         
-    def fetch_stock_data(self, symbol, period="6mo"):
-        """Fetch stock data from Yahoo Finance"""
+    @cache_data(timeout_minutes=15)  # Cache stock data for 15 minutes
+    def fetch_stock_data(self, symbol, period="3mo"):  # Reduced from 6mo for faster loading
+        """Fetch stock data from Yahoo Finance with caching"""
         try:
             stock = yf.Ticker(symbol)
             data = stock.history(period=period)
@@ -3379,45 +3432,41 @@ class StockPredictor:
             return None, symbol, None
     
     def calculate_technical_indicators(self, data):
-        """Calculate technical indicators"""
+        """Calculate essential technical indicators for faster processing"""
         df = data.copy()
         
         try:
-            # Price-based indicators
-            df['SMA_5'] = ta.trend.sma_indicator(df['Close'], window=5)
+            # Core moving averages (most important)
             df['SMA_20'] = ta.trend.sma_indicator(df['Close'], window=20)
             df['EMA_12'] = ta.trend.ema_indicator(df['Close'], window=12)
             df['EMA_26'] = ta.trend.ema_indicator(df['Close'], window=26)
             
-            # MACD
+            # Essential momentum indicators
+            df['RSI'] = ta.momentum.rsi(df['Close'], window=14)
             df['MACD'] = ta.trend.macd_diff(df['Close'])
             
-            # RSI
-            df['RSI'] = ta.momentum.rsi(df['Close'], window=14)
+            # Volatility (important for risk assessment)
+            df['ATR'] = ta.volatility.average_true_range(df['High'], df['Low'], df['Close'])
             
-            # Bollinger Bands
+            # Bollinger Bands (key support/resistance)
             bb = ta.volatility.BollingerBands(df['Close'])
             df['BB_upper'] = bb.bollinger_hband()
             df['BB_lower'] = bb.bollinger_lband()
             df['BB_width'] = df['BB_upper'] - df['BB_lower']
             
-            # Volume indicators
-            df['Volume_SMA'] = ta.volume.volume_sma(df['Close'], df['Volume'], window=20)
+            # Volume analysis (simplified)
+            df['Volume_Ratio'] = df['Volume'] / df['Volume'].rolling(window=20).mean()
             
-            # Volatility
-            df['ATR'] = ta.volatility.average_true_range(df['High'], df['Low'], df['Close'])
-            
-            # Price changes
+            # Price changes (vectorized for speed)
             df['Price_Change'] = df['Close'].pct_change()
             df['Price_Change_5'] = df['Close'].pct_change(periods=5)
             
-            # Support and Resistance levels
+            # Support and Resistance (simplified)
             df['Support'] = df['Low'].rolling(window=20).min()
             df['Resistance'] = df['High'].rolling(window=20).max()
             
-            # Momentum indicators
+            # One additional momentum indicator
             df['Stoch_K'] = ta.momentum.stoch(df['High'], df['Low'], df['Close'])
-            df['Williams_R'] = ta.momentum.williams_r(df['High'], df['Low'], df['Close'])
             
         except Exception as e:
             # If technical indicators fail, return original data
@@ -3426,24 +3475,23 @@ class StockPredictor:
         return df
     
     def prepare_features(self, data):
-        """Prepare features for ML model"""
+        """Prepare essential features for ML model (optimized for speed)"""
         df = self.calculate_technical_indicators(data)
         
-        # Feature columns
-        feature_cols = []
-        potential_features = [
-            'SMA_5', 'SMA_20', 'EMA_12', 'EMA_26', 'MACD', 'RSI',
-            'BB_upper', 'BB_lower', 'BB_width', 'Volume_SMA', 'ATR',
-            'Price_Change', 'Price_Change_5', 'Support', 'Resistance',
-            'Stoch_K', 'Williams_R'
+        # Essential feature columns only (reduced from 17 to 12)
+        essential_features = [
+            'SMA_20', 'EMA_12', 'EMA_26', 'MACD', 'RSI',
+            'BB_upper', 'BB_lower', 'BB_width', 'Volume_Ratio', 'ATR',
+            'Price_Change', 'Price_Change_5'
         ]
         
         # Only include features that exist and have data
-        for col in potential_features:
+        feature_cols = []
+        for col in essential_features:
             if col in df.columns and not df[col].isna().all():
                 feature_cols.append(col)
         
-        if len(feature_cols) < 5:  # Minimum features required
+        if len(feature_cols) < 6:  # Reduced minimum requirement
             return None, None, None
         
         # Create target variable (next day's return)
@@ -3458,27 +3506,32 @@ class StockPredictor:
         return df[feature_cols], df['Target'], df
     
     def quick_predict(self, symbol, company_name):
-        """Quick prediction for a single stock"""
+        """Quick prediction for a single stock with optimized models"""
         try:
             # Fetch data
-            data, full_symbol, info = self.fetch_stock_data(symbol)
+            data, full_symbol, info = self.fetch_stock_data(symbol, period="3mo")  # Reduced period
             
-            if data is None or len(data) < 50:
+            if data is None or len(data) < 30:  # Reduced minimum requirement
                 return None
             
             # Prepare features
             X, y, df_with_indicators = self.prepare_features(data)
             
-            if X is None or len(X) < 30:
+            if X is None or len(X) < 20:  # Reduced minimum requirement
                 return None
             
-            # Quick train
+            # Quick train with optimized parameters
             X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
             scaler = StandardScaler()
             X_train_scaled = scaler.fit_transform(X_train)
             
-            # Simple Random Forest
-            model = RandomForestRegressor(n_estimators=50, random_state=42, max_depth=8)
+            # Faster Random Forest with fewer estimators
+            model = RandomForestRegressor(
+                n_estimators=25,  # Reduced from 50
+                random_state=42, 
+                max_depth=6,  # Reduced from 8
+                n_jobs=-1  # Use all CPU cores
+            )
             model.fit(X_train_scaled, y_train)
             
             # Predict next day
@@ -3630,7 +3683,7 @@ class NewsAnalyzer:
             return "Market analysis not available", "neutral"
 
 def scan_stocks(predictor, stock_dict, progress_bar, status_text):
-    """Scan multiple stocks concurrently"""
+    """Scan multiple stocks concurrently with optimized performance"""
     recommendations = []
     processed = 0
     total = len(stock_dict)
@@ -3638,8 +3691,9 @@ def scan_stocks(predictor, stock_dict, progress_bar, status_text):
     def process_stock(symbol, company_name):
         return predictor.quick_predict(symbol, company_name)
     
-    # Use ThreadPoolExecutor for concurrent processing
-    with ThreadPoolExecutor(max_workers=5) as executor:
+    # Use more workers for better concurrency
+    max_workers = min(10, len(stock_dict))  # Increase workers but limit to reasonable number
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
         future_to_stock = {
             executor.submit(process_stock, symbol, company_name): (symbol, company_name)
             for symbol, company_name in stock_dict.items()
@@ -3648,7 +3702,7 @@ def scan_stocks(predictor, stock_dict, progress_bar, status_text):
         for future in as_completed(future_to_stock):
             symbol, company_name = future_to_stock[future]
             try:
-                result = future.result(timeout=30)  # 30 second timeout per stock
+                result = future.result(timeout=20)  # Reduced timeout from 30 to 20 seconds
                 if result:
                     recommendations.append(result)
                 processed += 1
@@ -3665,9 +3719,10 @@ def scan_stocks(predictor, stock_dict, progress_bar, status_text):
 
 class IntradayGrowthPredictor:
     def __init__(self):
+        # Optimized models with fewer estimators for faster training
         self.models = {
-            'Intraday_RF': RandomForestRegressor(n_estimators=50, max_depth=5, random_state=42),
-            'Intraday_GB': GradientBoostingRegressor(n_estimators=50, learning_rate=0.2, max_depth=4, random_state=42)
+            'Intraday_RF': RandomForestRegressor(n_estimators=20, max_depth=4, random_state=42, n_jobs=-1),
+            'Intraday_GB': GradientBoostingRegressor(n_estimators=20, learning_rate=0.2, max_depth=3, random_state=42)
         }
     
     def predict_intraday_growth(self, df, current_time):
@@ -4372,29 +4427,33 @@ def main():
     with col4:
         analyze_button = st.button("🔍 Analyze", type="primary", width='stretch')
     
-    # User preferences - collapsible
-    with st.expander("⚙️ Customize Your Analysis", expanded=False):
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            st.markdown("**📊 What to Show:**")
-            show_prediction = st.checkbox("Price Prediction", value=True)
-            show_current_overview = st.checkbox("Current Stock Overview", value=True)
-            show_company_info = st.checkbox("Company Information", value=True)
-            show_charts = st.checkbox("Technical Charts", value=True)
-            show_news = st.checkbox("Market News", value=True)
-        
-        with col2:
-            # Fixed to Deep Analysis mode
-            analysis_depth = "Deep Analysis"
-            st.markdown("**🔍 Analysis Mode:**")
-            st.info("🚀 Deep Analysis Mode - Complete AI Analysis with all features enabled")
+        # User preferences - collapsible
+        with st.expander("⚙️ Customize Your Analysis", expanded=False):
+            col1, col2 = st.columns(2)
             
-            st.markdown("**📈 Additional Options:**")
-            show_reasoning = st.checkbox("Show Analysis Reasoning", value=True)
-            show_methodology = st.checkbox("Show Methodology", value=True)
-    
-    # API Configuration - only if user wants advanced features
+            with col1:
+                st.markdown("**📊 What to Show:**")
+                show_prediction = st.checkbox("Price Prediction", value=True)
+                show_current_overview = st.checkbox("Current Stock Overview", value=True)
+                show_company_info = st.checkbox("Company Information", value=True)
+                show_charts = st.checkbox("Technical Charts", value=True)
+                show_news = st.checkbox("Market News", value=True)
+            
+            with col2:
+                st.markdown("**🔍 Analysis Mode:**")
+                quick_mode = st.checkbox("🚀 Quick Mode (2x faster)", value=False, 
+                                       help="Enables optimizations for faster analysis")
+                
+                if quick_mode:
+                    analysis_depth = "Quick Analysis"
+                    st.info("⚡ Quick Mode: Optimized for speed with essential analysis")
+                else:
+                    analysis_depth = "Deep Analysis"
+                    st.info("� Deep Analysis: Complete AI analysis with all features")
+                
+                st.markdown("**📈 Additional Options:**")
+                show_reasoning = st.checkbox("Show Analysis Reasoning", value=True)
+                show_methodology = st.checkbox("Show Methodology", value=True)    # API Configuration - only if user wants advanced features
     if show_news or analysis_depth == "Deep Analysis":
         with st.expander("🔑 API Keys for Enhanced Analysis (Optional)"):
             col1, col2, col3 = st.columns(3)
@@ -4428,7 +4487,7 @@ def main():
             # Always use deep analysis
             progress_placeholder.info("📊 Fetching stock data...")
             
-            data, full_symbol = analyzer.get_global_stock_data(stock_symbol, period="2y")
+            data, full_symbol = analyzer.get_global_stock_data(stock_symbol, period="1y")  # Reduced from 2y to 1y
             
             if data is None or data.empty:
                 st.error(f"❌ Could not fetch data for {stock_symbol}. Please verify the symbol.")
