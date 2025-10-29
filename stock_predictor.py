@@ -1919,7 +1919,7 @@ class TransparentStockAnalyzer:
         """Generate predictions for 1, 7, and 30 days with reasoning"""
         
         try:
-            current_price = df['Close'].iloc[-1]
+            current_price = float(df['Close'].iloc[-1])
             current_date = datetime.now()
             
             # Get base prediction logic (same as before but return scores)
@@ -1949,18 +1949,18 @@ class TransparentStockAnalyzer:
                 # Cap the changes realistically
                 adjusted_change = np.clip(adjusted_change, -0.25, 0.25)  # ±25% max
                 
-                predicted_price = current_price * (1 + adjusted_change)
-                confidence = np.clip(scores['base_confidence'] * confidence_modifier, 50, 90)
+                predicted_price = float(current_price * (1 + adjusted_change))
+                confidence = float(np.clip(scores['base_confidence'] * confidence_modifier, 50, 90))
                 
                 # Calculate target date
                 target_date = current_date + timedelta(days=days)
                 
                 timeframe_predictions[f"{days}_day"] = {
                     'target_date': target_date.strftime("%d/%m/%y"),
-                    'predicted_price': predicted_price,
-                    'change_amount': predicted_price - current_price,
-                    'change_percent': ((predicted_price / current_price) - 1) * 100,
-                    'confidence': confidence,
+                    'predicted_price': float(predicted_price),
+                    'change_amount': float(predicted_price - current_price),
+                    'change_percent': float(((predicted_price / current_price) - 1) * 100),
+                    'confidence': float(confidence),
                     'key_factors': scores['key_factors'][:3]  # Top 3 factors
                 }
             
@@ -1969,14 +1969,16 @@ class TransparentStockAnalyzer:
         except Exception as e:
             # Fallback predictions
             fallback = {}
+            current_price_val = float(df['Close'].iloc[-1]) if not df.empty else 100.0
             for days in [1, 7, 30]:
-                target_date = (current_date + timedelta(days=days)).strftime("%d/%m/%y")
+                target_date = (datetime.now() + timedelta(days=days)).strftime("%d/%m/%y")
+                pred_price = float(current_price_val * (1 + np.random.normal(0, 0.02)))
                 fallback[f"{days}_day"] = {
                     'target_date': target_date,
-                    'predicted_price': current_price * (1 + np.random.normal(0, 0.02)),
-                    'change_amount': 0,
-                    'change_percent': 0,
-                    'confidence': 60,
+                    'predicted_price': float(pred_price),
+                    'change_amount': float(pred_price - current_price_val),
+                    'change_percent': float(((pred_price / current_price_val) - 1) * 100),
+                    'confidence': 60.0,
                     'key_factors': ['Technical Analysis', 'Market Sentiment', 'Historical Patterns']
                 }
             return fallback
@@ -1985,7 +1987,7 @@ class TransparentStockAnalyzer:
                                    patterns: Dict, world_data: Dict) -> Dict:
         """Calculate prediction scores for multi-timeframe analysis"""
         try:
-            current_price = df['Close'].iloc[-1]
+            current_price = float(df['Close'].iloc[-1])
             
             # Technical Analysis Score (40% weight) - Enhanced
             technical_score = 0
@@ -3137,6 +3139,9 @@ def analyze_individual_charts(data: pd.DataFrame) -> Dict:
 
 def calculate_risk_management(current_price: float, predictions: Dict, chart_analysis: Dict, fundamentals: Dict) -> Dict:
     """Calculate risk management recommendations"""
+    print(f"[DEBUG] calculate_risk_management called with current_price={current_price}, predictions type={type(predictions)}")
+    print(f"[DEBUG] predictions keys: {predictions.keys() if predictions else 'None'}")
+    
     risk_analysis = {
         'position_size': 0,
         'stop_loss': 0,
@@ -3155,8 +3160,18 @@ def calculate_risk_management(current_price: float, predictions: Dict, chart_ana
         risk_per_trade = portfolio_value * 0.02  # 2% risk per trade
         
         # Calculate stop loss based on technical levels
-        if 'Support_Level' in chart_analysis.get('key_levels', []):
-            support_level = float(chart_analysis['key_levels'][0].split('₹')[1].split(' ')[0])
+        support_level = None
+        key_levels = chart_analysis.get('key_levels', [])
+        for level_str in key_levels:
+            if 'Support:' in level_str:
+                try:
+                    # Extract support value from string like "Support: ₹123.45"
+                    support_level = float(level_str.split('₹')[1].split(',')[0].strip())
+                    break
+                except (IndexError, ValueError):
+                    pass
+        
+        if support_level:
             stop_loss = support_level * 0.95  # 5% below support
         else:
             # Use ATR-based stop loss
@@ -3164,14 +3179,49 @@ def calculate_risk_management(current_price: float, predictions: Dict, chart_ana
             stop_loss = current_price * (1 - (atr_multiplier * 0.02))  # 2% ATR-based stop
         
         # Calculate take profit based on resistance or target
-        if 'Resistance_Level' in chart_analysis.get('key_levels', []):
-            resistance_level = float(chart_analysis['key_levels'][0].split('₹')[1].split(' ')[0])
+        resistance_level = None
+        for level_str in key_levels:
+            if 'Resistance:' in level_str:
+                try:
+                    # Extract resistance value from string like "Resistance: ₹123.45"
+                    resistance_level = float(level_str.split('Resistance:')[1].split('₹')[1].split(',')[0].strip())
+                    break
+                except (IndexError, ValueError):
+                    pass
+        
+        if resistance_level:
             take_profit = resistance_level * 0.95  # 5% below resistance
         else:
             # Use prediction-based target
             if predictions:
-                avg_prediction = np.mean([pred['predicted_price'] for pred in predictions.values()])
-                take_profit = avg_prediction * 0.95  # 5% below prediction
+                print(f"[DEBUG] Calculating avg_prediction from predictions")
+                print(f"[DEBUG] Sample prediction: {list(predictions.values())[0] if predictions else 'None'}")
+                try:
+                    predicted_prices = []
+                    for pred in predictions.values():
+                        if isinstance(pred, dict):
+                            price = pred.get('predicted_price')
+                            if price is not None:
+                                # Handle if price is already a float or needs conversion
+                                if isinstance(price, (int, float)):
+                                    predicted_prices.append(float(price))
+                                elif isinstance(price, dict):
+                                    # If price itself is a dict, skip it
+                                    print(f"[DEBUG] Skipping dict price: {price}")
+                                    continue
+                        elif isinstance(pred, (int, float)):
+                            predicted_prices.append(float(pred))
+                    
+                    if predicted_prices:
+                        avg_prediction = np.mean(predicted_prices)
+                        take_profit = avg_prediction * 0.95  # 5% below prediction
+                    else:
+                        take_profit = current_price * 1.15  # 15% upside target
+                except (KeyError, TypeError, ValueError) as e:
+                    print(f"[DEBUG] Error calculating avg_prediction: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    take_profit = current_price * 1.15  # 15% upside target
             else:
                 take_profit = current_price * 1.15  # 15% upside target
         
